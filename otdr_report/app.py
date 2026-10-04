@@ -165,7 +165,8 @@ class _Job(QObject):
     def finished(self, result):
         cancelled = self._close_dialog()
         self.thread.quit()
-        self.on_done(result, cancelled)
+        if not getattr(self.parent(), "_closing", False):   # το παράθυρο κλείνει: χωρίς μηνύματα
+            self.on_done(result, cancelled)
 
     @Slot(str)
     def failed(self, msg):
@@ -176,6 +177,10 @@ class _Job(QObject):
 
 def run_with_progress(parent, title: str, fn, on_done):
     job = _Job(parent, title, on_done)
+    if parent is not None:
+        jobs = parent.__dict__.setdefault("_running_jobs", [])
+        jobs.append(job)
+        job.destroyed.connect(lambda *_: jobs.remove(job) if job in jobs else None)
     thread = QThread(parent)
     worker = Worker(fn)
     worker.moveToThread(thread)
@@ -594,6 +599,23 @@ class MainWindow(QMainWindow):
         main.setSizes([380, 1020])
         self.setCentralWidget(main)
         self._refresh()
+
+    def closeEvent(self, e):
+        """Αν τρέχει φόρτωση ή PDF, τη σταματάμε και περιμένουμε να τελειώσει πριν κλείσουμε.
+
+        Χωρίς αυτό, το νήμα συνέχιζε ενώ το παράθυρο καταστρεφόταν και η εφαρμογή έπεφτε.
+        """
+        running = [j for j in self.__dict__.get("_running_jobs", []) if j.thread.isRunning()]
+        if running:
+            self._closing = True
+            self.statusBar().showMessage("Σταματάω την εργασία που τρέχει…")
+            for j in running:
+                j.worker.cancelled = True
+            for j in running:
+                while j.thread.isRunning():
+                    QApplication.processEvents()
+                    j.thread.wait(50)
+        super().closeEvent(e)
 
     # ---------- φόρτωση
     def open_folder(self):

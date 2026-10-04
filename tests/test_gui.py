@@ -178,3 +178,22 @@ def test_load_message_texts():
         "Φορτώθηκαν 35 νέα αρχεία, 5 ήταν ήδη φορτωμένα."
     msg = appmod.load_message(LoadResult(found=40, loaded=5, cancelled=True, not_processed=35))
     assert msg.startswith("Η φόρτωση ακυρώθηκε: φορτώθηκαν 5 από 40 αρχεία.")
+
+
+def test_close_while_job_runs_waits_for_it(win, qapp):
+    """Codex #1: κλείσιμο ενώ τρέχει εργασία → σταματά το νήμα, χωρίς crash και χωρίς μηνύματα."""
+    got, started = [], []
+
+    def job(w):
+        started.append(1)
+        deadline = time.time() + 20
+        while not w.cancelled and time.time() < deadline:
+            time.sleep(0.01)
+        return "stopped"
+    appmod.run_with_progress(win, "test", job, lambda res, cancelled: got.append(res))
+    wait(qapp, lambda: started)
+    win.close()
+    assert all(not t.isRunning() for t in win.findChildren(appmod.QThread))
+    for _ in range(20):
+        qapp.processEvents()
+    assert got == []                                   # on_done δεν καλείται σε παράθυρο που κλείνει

@@ -130,3 +130,88 @@ def test_real_files_need_both_wavelengths():
             DATA / "scp51_dis_207_1550_0100.sor"])
     c = p.cables["scp51"]
     assert [f.display for f in c.incomplete()] == ["scp51_dis_101_0001"]
+
+
+# ---------- Έλεγχος Codex #2 (βήμα 4): αλλοιωμένο SOR δεν δίνει ποτέ αποτέλεσμα ----------
+def _fail_file() -> bytes:
+    # κακή κόλληση 0.95 dB (FAIL) ως τελευταίο συμβάν πριν από το τέλος
+    return build_sor(1310, 2.0, [(0.25, 0.3, -48.0), (1.5, 0.95, 0)], seed=3)
+
+
+def _keyevents_count_offset(data: bytes) -> int:
+    from otdr_report.sor import _Reader, _read_map
+    _v2, _ver, blocks = _read_map(_Reader(data))
+    return blocks["KeyEvents"][0] + len(b"KeyEvents\0")
+
+
+def test_reduced_event_count_is_rejected():
+    from otdr_report.sor import SorError
+    good = _fail_file()
+    assert evaluate(prepare(parse_sor_bytes(good), ReportSettings()), ReportSettings().thresholds) is False
+    off = _keyevents_count_offset(good)
+    n = int.from_bytes(good[off:off + 2], "little")
+    bad = good[:off] + (n - 2).to_bytes(2, "little") + good[off + 2:]   # «χάνονται» το FAIL και το τέλος
+    with pytest.raises(SorError):
+        parse_sor_bytes(bad)
+
+
+def test_corrupted_event_code_and_order_are_rejected():
+    from otdr_report.sor import SorError
+    good = _fail_file()
+    i = good.index(b"0F9999LS")
+    with pytest.raises(SorError):
+        parse_sor_bytes(good[:i] + b"\x00F" + good[i + 2:])                 # σκουπίδι στον κωδικό
+    off = _keyevents_count_offset(good) + 2 + 2                              # πρώτο συμβάν: tof
+    with pytest.raises(SorError):
+        parse_sor_bytes(good[:off] + (10**9).to_bytes(4, "little") + good[off + 4:])  # εκτός σειράς
+
+
+def test_shifted_block_is_rejected():
+    from otdr_report.sor import SorError
+    good = _fail_file()
+    i = good.index(b"KeyEvents\0", 100)                                       # το ίδιο το τμήμα, όχι ο χάρτης
+    with pytest.raises(SorError):
+        parse_sor_bytes(good[:i] + b"XeyEvents\0" + good[i + 10:])
+
+
+def test_corrupted_file_is_reported_on_load(tmp_path):
+    good = _fail_file()
+    off = _keyevents_count_offset(good)
+    bad = good[:off] + (1).to_bytes(2, "little") + good[off + 2:]
+    (tmp_path / "K_1310_0001.sor").write_bytes(bad)
+    res = Project().load([tmp_path / "K_1310_0001.sor"])
+    assert len(res.failed) == 1 and "Κατεστραμμένο" in res.failed[0][1]
+
+
+# ---------- Έλεγχος Codex #3: δύο 1310 δεν γίνονται ζεύγος ----------
+def test_name_wavelength_must_match_measurement(tmp_path):
+    make_cable(tmp_path, "P_SCP1", 1)
+    shutil.copy(tmp_path / "P_SCP1_1310_0001.sor", tmp_path / "P_SCP1_1550_0001.sor")   # «1550» που είναι 1310
+    p = Project()
+    res = p.load(find_sor_files(tmp_path))
+    assert [x[0].name for x in res.failed] == ["P_SCP1_1550_0001.sor"]
+    assert "1550 nm" in res.failed[0][1] and "1310 nm" in res.failed[0][1]
+    assert [f.number for f in p.cables["P_SCP1"].incomplete()] == [1]
+
+
+# ---------- Έλεγχος Codex #4: C1 και c1 δεν σβήνουν το ένα το άλλο ----------
+def test_case_only_cable_names_get_distinct_pdfs(tmp_path):
+    make_cable(tmp_path / "a", "C1", 1)
+    make_cable(tmp_path / "b", "c1", 1, seed=5)
+    p = Project()
+    p.load(find_sor_files(tmp_path))
+    out = generate_reports([(c, c.sorted_fibers()) for c in p.sorted_cables()], tmp_path / "out", ReportSettings())
+    names = [x.name for x in out]
+    assert len(names) == 2 and len({n.casefold() for n in names}) == 2
+    assert all(x.exists() for x in out)
+
+
+# ---------- Έλεγχος Codex #6: η ακύρωση ισχύει και την ώρα που γράφεται το PDF ----------
+def test_cancel_during_rendering(tmp_path):
+    make_cable(tmp_path / "in", "R1", 30)
+    p = Project()
+    p.load(find_sor_files(tmp_path / "in"))
+    out = generate_reports([(c, c.sorted_fibers()) for c in p.sorted_cables()], tmp_path / "out",
+                           ReportSettings(), lambda d, t, label: label != "Γράφεται το PDF…")
+    assert out.cancelled and out == []
+    assert not list((tmp_path / "out").glob("*.pdf"))                       # ούτε μισό .part.pdf

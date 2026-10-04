@@ -16,6 +16,8 @@ from .sor import SorError, SorFile, parse_sor
 KNOWN_WAVELENGTHS = (850, 1300, 1310, 1383, 1490, 1550, 1625, 1650)
 # Έγκυρη μέτρηση = και τα δύο μήκη κύματος (απόφαση χρήστη). Όποια λείπει → ΕΛΛΙΠΗΣ.
 REQUIRED_WAVELENGTHS = frozenset({1310, 1550})
+# Πόσο μπορεί να απέχει το μήκος κύματος του ονόματος από αυτό που έγραψε το όργανο
+WAVELENGTH_TOLERANCE_NM = 25
 _WL = "|".join(str(w) for w in KNOWN_WAVELENGTHS)
 _SEP = r"[_\-. ]"
 
@@ -258,9 +260,16 @@ class Project:
 
         def work(p: Path):
             try:
-                return p, _file_stat(p), parse_sor(p, with_trace=False), None
+                sor = parse_sor(p, with_trace=False)
             except (SorError, OSError, ValueError) as e:
                 return p, None, None, str(e)
+            # Το όνομα δεν αρκεί: το μήκος κύματος πρέπει να είναι και αυτό της μέτρησης,
+            # αλλιώς δύο μετρήσεις 1310 θα περνούσαν για ζεύγος 1310+1550.
+            named = parse_name(p).wavelength
+            if named and sor.wavelength and abs(named - sor.wavelength) > WAVELENGTH_TOLERANCE_NM:
+                return p, None, None, (f"Το όνομα λέει {named} nm αλλά η μέτρηση μέσα στο αρχείο "
+                                       f"είναι {sor.wavelength} nm")
+            return p, _file_stat(p), sor, None
 
         index = {it[0]: i for i, it in enumerate(self._items)}
         total = len(todo)

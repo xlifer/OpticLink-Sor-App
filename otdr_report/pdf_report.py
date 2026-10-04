@@ -359,6 +359,24 @@ def fiber_verdict(fiber: Fiber, wls: list[int], th, sors: dict[int, SorFile] | N
     return True
 
 
+class _Cancelled(Exception):
+    pass
+
+
+class _CancellableDoc(SimpleDocTemplate):
+    """Ελέγχει για ακύρωση και κατά το γράψιμο του PDF (όχι μόνο πριν)."""
+
+    def __init__(self, *args, keep_going=None, **kw):
+        super().__init__(*args, **kw)
+        self._keep_going = keep_going
+        self._count = 0
+
+    def afterFlowable(self, flowable):
+        self._count += 1
+        if self._keep_going and self._count % 20 == 0 and not self._keep_going():
+            raise _Cancelled()
+
+
 class ReportBuilder:
     def __init__(self, settings: ReportSettings):
         _register_fonts()
@@ -598,7 +616,8 @@ class ReportBuilder:
 
     # ---------- κατασκευή αρχείου ----------
     def build(self, out_path: Path, parts: list[tuple[Cable, list[Fiber], dict]],
-              progress: Callable[[str], bool] | None = None) -> bool:
+              progress: Callable[[str], bool] | None = None,
+              keep_going: Callable[[], bool] | None = None) -> bool:
         """parts: (καλώδιο, μετρήσεις, read) όπου read[fiber.key] = {λ: SorFile διαβασμένο τώρα}."""
         story = []
         for cable, fibers, read in parts:
@@ -631,11 +650,15 @@ class ReportBuilder:
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = out_path.with_suffix(".part.pdf")
-        doc = SimpleDocTemplate(str(tmp), pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
-                                topMargin=10 * mm, bottomMargin=(21 if signatures else 14) * mm,
-                                title=f"{t['title']} – " + ", ".join(p[0].name for p in parts),
-                                author=self.s.company or "")
-        doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+        doc = _CancellableDoc(str(tmp), pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
+                              topMargin=10 * mm, bottomMargin=(21 if signatures else 14) * mm,
+                              title=f"{t['title']} – " + ", ".join(p[0].name for p in parts),
+                              author=self.s.company or "", keep_going=keep_going)
+        try:
+            doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+        except _Cancelled:
+            tmp.unlink(missing_ok=True)
+            return False
         tmp.replace(out_path)
         return True
 
@@ -733,6 +756,9 @@ def generate_reports(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path, sett
         step += 1
         return progress(step, total, label) if progress else True
 
+    def keep_going() -> bool:      # έλεγχος ακύρωσης χωρίς να προχωρά η μπάρα
+        return progress(step, total, "Γράφεται το PDF…") is not False if progress else True
+
     def read_cable(cable: Cable, fibers: list[Fiber]):
         wls = set(cable.wavelengths)
         keep, read = [], {}
@@ -755,6 +781,7 @@ def generate_reports(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path, sett
         return cable, keep, read
 
     groups = [[p] for p in parts] if settings.one_pdf_per_cable else [parts]
+    used: set[str] = set()      # τα Windows δεν ξεχωρίζουν κεφαλαία/πεζά: C1 και c1 = ίδιο αρχείο
     for group in groups:
         prepared = []
         for cable, fibers in group:
@@ -768,10 +795,15 @@ def generate_reports(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path, sett
             continue
         if settings.one_pdf_per_cable:
             cable, fibers, _ = prepared[0]
-            out = out_dir / f"{safe_filename(cable.name)}{_range_suffix(fibers)}.pdf"
+            stem = f"{safe_filename(cable.name)}{_range_suffix(fibers)}"
         else:
-            out = out_dir / f"OTDR_report_{datetime.now():%Y%m%d_%H%M}.pdf"
-        if not builder.build(out, prepared, tick):
+            stem = f"OTDR_report_{datetime.now():%Y%m%d_%H%M}"
+        name, k = stem, 2
+        while name.casefold() in used:
+            name, k = f"{stem} ({k})", k + 1
+        used.add(name.casefold())
+        out = out_dir / f"{name}.pdf"
+        if not builder.build(out, prepared, tick, keep_going):
             result.cancelled = True
             return result
         result.append(out)

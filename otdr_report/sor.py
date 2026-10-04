@@ -236,12 +236,21 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
         raise SorError(f"Μη έγκυρη κεφαλίδα SOR: {e}") from None
     if "FxdParams" not in blocks:
         raise SorError("Λείπει το block FxdParams – δεν είναι αρχείο SOR")
+    # Έλεγχος δομής: το FHO5000 γράφει checksum 0, οπότε ένα αλλοιωμένο αρχείο
+    # εντοπίζεται μόνο από ασυνέπειες στη δομή του. Ποτέ αποτέλεσμα από χαλασμένο αρχείο.
+    for name in ("GenParams", "SupParams", "FxdParams", "KeyEvents", "DataPts"):
+        if name in blocks:
+            off, size = blocks[name]
+            if off + size > len(data):
+                raise SorError(f"Κατεστραμμένο αρχείο: το τμήμα {name} ξεπερνά το τέλος του αρχείου")
 
     def block(name):
         off, _ = blocks[name]
         br = _Reader(data, off)
         if v2:
-            br.str()
+            found = br.str()
+            if found != name:
+                raise SorError(f"Κατεστραμμένο αρχείο: αναμενόταν το τμήμα {name}, βρέθηκε {found[:20]!r}")
         return br
 
     gen = {}
@@ -298,8 +307,11 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
     total_loss = orl = None
     length = 0.0
     if "KeyEvents" in blocks:
+        k_off, k_size = blocks["KeyEvents"]
+        k_end = k_off + k_size
         k = block("KeyEvents")
         n = k.u16()
+        prev_tof = 0
         for _ in range(n):
             num = k.u16()
             tof = k.u32()
@@ -311,14 +323,24 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
                 for _ in range(5):
                     k.u32()
             comment = k.str()
+            if len(code) < 2 or code[0] not in "012" or not code[1].isalpha():
+                raise SorError(f"Κατεστραμμένο αρχείο: μη έγκυρος κωδικός συμβάντος {code!r}")
+            if tof < prev_tof:
+                raise SorError("Κατεστραμμένο αρχείο: τα συμβάντα δεν είναι σε σειρά απόστασης")
+            prev_tof = tof
             events.append(Event(num, tof * km_per_tof, slope, loss, refl, code, comment))
-        try:
+        summary_size = 22   # συνολική απώλεια, αρχή, μήκος, ORL, αρχή/τέλος ORL
+        if k_end - k.p >= summary_size:
             total_loss = k.i32() / 1000
             k.i32()
             length = k.u32() * km_per_tof
             orl = k.u16() / 1000
-        except SorError:
-            pass
+            k.i32(); k.u32()
+        # Το πλήθος συμβάντων πρέπει να γεμίζει ακριβώς το τμήμα: αλλιώς το πλήθος έχει αλλοιωθεί
+        # (π.χ. λιγότερα συμβάντα → θα χανόταν ένα FAIL).
+        min_event = 42 if v2 else 22
+        if k.p > k_end or k_end - k.p >= min_event:
+            raise SorError("Κατεστραμμένο αρχείο: το πλήθος συμβάντων δεν ταιριάζει με το μέγεθος του τμήματος")
 
     if not length:
         ends = [e for e in events if e.is_end]
