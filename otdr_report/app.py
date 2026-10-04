@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from . import __version__
 from .matching import Cable, Fiber, Project, _natural_key, find_sor_files
 from .pdf_report import TEXT, Units, event_headers, event_rows, fiber_verdict, generate_reports
-from .settings import ReportSettings, evaluate, prepare
+from .settings import ReportSettings, evaluate, is_dead_fiber, prepare
 from .sor import parse_sor
 
 APP_NAME = "OTDR Batch Report"
@@ -147,15 +147,29 @@ class _Job(QObject):
         self.dlg.setValue(done)
         self.dlg.setLabelText(f"{self.title}\n{label}" if label else self.title)
 
+    def _close_dialog(self) -> bool:
+        """Κλείνει το παράθυρο προόδου και επιστρέφει αν ο χρήστης πάτησε «Ακύρωση».
+
+        Το QProgressDialog.close() στέλνει κι αυτό σήμα canceled, οπότε η ακύρωση
+        διαβάζεται πριν από το κλείσιμο και το σήμα αποσυνδέεται.
+        """
+        cancelled = self.worker.cancelled
+        try:
+            self.dlg.canceled.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.dlg.close()
+        return cancelled
+
     @Slot(object)
     def finished(self, result):
-        self.dlg.close()
+        cancelled = self._close_dialog()
         self.thread.quit()
-        self.on_done(result, self.worker.cancelled)
+        self.on_done(result, cancelled)
 
     @Slot(str)
     def failed(self, msg):
-        self.dlg.close()
+        self._close_dialog()
         self.thread.quit()
         QMessageBox.critical(self.parent(), APP_NAME, msg)
 
@@ -231,6 +245,12 @@ class SettingsDialog(QDialog):
         self.signatures = QCheckBox("Γραμμές υπογραφών (Συντάχθηκε / Ελέγχθηκε / Εγκρίθηκε)")
         self.signatures.setChecked(s.signatures)
         f1.addRow("", self.signatures)
+        self.allow_incomplete = QCheckBox(
+            "Να επιτρέπεται PDF για μετρήσεις χωρίς 1310 ΚΑΙ 1550 (με ευθύνη του χρήστη)")
+        self.allow_incomplete.setChecked(s.allow_incomplete)
+        self.allow_incomplete.setStyleSheet(f"color: {FAIL_C.name()}; font-weight: bold;")
+        self.allow_incomplete.toggled.connect(self._confirm_incomplete)
+        f1.addRow("", self.allow_incomplete)
         lay.addWidget(g1)
 
         th = s.thresholds
@@ -280,6 +300,20 @@ class SettingsDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
+    def _confirm_incomplete(self, on: bool):
+        if not on:
+            return
+        ans = QMessageBox.warning(
+            self, APP_NAME,
+            "Μέτρηση χωρίς και τα δύο μήκη κύματος (1310 και 1550) ΔΕΝ είναι έγκυρη.\n\n"
+            "Αν το ενεργοποιήσεις, τέτοιες μετρήσεις θα μπαίνουν στο PDF με την ένδειξη ΕΛΛΙΠΗΣ, "
+            "με δική σου ευθύνη.\n\nΝα ενεργοποιηθεί;",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ans != QMessageBox.Yes:
+            self.allow_incomplete.blockSignals(True)
+            self.allow_incomplete.setChecked(False)
+            self.allow_incomplete.blockSignals(False)
+
     def _pick_logo(self):
         fn, _ = QFileDialog.getOpenFileName(self, "Λογότυπο", "", "Εικόνες (*.png *.jpg *.jpeg)")
         if fn:
@@ -298,6 +332,7 @@ class SettingsDialog(QDialog):
         s.launch_mode = self.launch_mode.currentData()
         s.launch_m = self.launch_m.value()
         s.signatures = self.signatures.isChecked()
+        s.allow_incomplete = self.allow_incomplete.isChecked()
         th = s.thresholds
         th.enabled = self.g2.isChecked()
         th.check_splice = self.cb_splice.isChecked()
@@ -343,8 +378,23 @@ class ExportDialog(QDialog):
         rng.addWidget(QLabel("από")); rng.addWidget(self.from_f)
         rng.addWidget(QLabel("έως")); rng.addWidget(self.to_f); rng.addStretch()
         form.addRow("Ίνες", rng)
-        self.only_complete = QCheckBox("Μόνο ίνες που έχουν όλα τα μήκη κύματος")
+        self.only_complete = QCheckBox("Μόνο μετρήσεις που έχουν 1310 και 1550")
+        n_inc = sum(len(c.incomplete()) for c in project.cables.values())
+        if s.allow_incomplete:
+            self.only_complete.setChecked(False)
+            note = QLabel(f"Προσοχή: έχεις επιτρέψει PDF για ελλιπείς μετρήσεις ({n_inc}).")
+            note.setStyleSheet(f"color: {FAIL_C.name()}; font-weight: bold;")
+        else:
+            self.only_complete.setChecked(True)
+            self.only_complete.setEnabled(False)
+            note = QLabel(f"{n_inc} μετρήσεις χωρίς 1310 και 1550 δεν θα μπουν στο PDF "
+                          "(αλλάζει από τις Ρυθμίσεις αναφοράς)." if n_inc else
+                          "Όλες οι μετρήσεις έχουν 1310 και 1550.")
+            if n_inc:
+                note.setStyleSheet(f"color: {MISS_C.name()}; font-weight: bold;")
+        note.setWordWrap(True)
         form.addRow("", self.only_complete)
+        form.addRow("", note)
         self.per_cable = QCheckBox("Ένα PDF ανά καλώδιο (αλλιώς ένα PDF για όλα)")
         self.per_cable.setChecked(s.one_pdf_per_cable)
         form.addRow("", self.per_cable)
@@ -387,7 +437,7 @@ class ExportDialog(QDialog):
             c = self.project.cables[it.data(0, Qt.UserRole)]
             wls = set(c.wavelengths)
             fibers = [f for f in c.sorted_fibers() if lo <= f.number <= hi
-                      and (not self.only_complete.isChecked() or set(f.measurements) == wls)]
+                      and (not self.only_complete.isChecked() or wls <= set(f.measurements))]
             if fibers:
                 out.append((c, fibers))
         return out
@@ -577,26 +627,22 @@ class MainWindow(QMainWindow):
                     files += find_sor_files(p)
                 elif p.suffix.lower() == ".sor":
                     files.append(p)
-            before = len(project.errors)
-
             def prog(i, n):
                 if i % 25 == 0 or i == n:
                     w.progress.emit(i, n, f"{i} / {n}")
                 return not w.cancelled
-            project.load(files, prog)
-            return len(files), project.errors[before:]
+            return project.load(files, prog)
 
         def done(res, cancelled):
             self._refresh()
             if not res:
                 return
-            n, errs = res
-            msg = f"Φορτώθηκαν {n - len(errs)} αρχεία."
-            if errs:
-                msg += f"\n\n{len(errs)} αρχεία δεν διαβάστηκαν:\n" + "\n".join(
-                    f"• {p.name}: {e}" for p, e in errs[:15])
+            msg = load_message(res)
+            if res.failed:
+                msg += f"\n\n{len(res.failed)} αρχεία δεν διαβάστηκαν (θα ξαναδοκιμαστούν στην επόμενη φόρτωση):\n" \
+                    + "\n".join(f"• {p.name}: {e}" for p, e in res.failed[:15])
                 QMessageBox.warning(self, APP_NAME, msg)
-            self.statusBar().showMessage(msg.splitlines()[0], 8000)
+            self.statusBar().showMessage(msg.splitlines()[0], 10000)
 
         run_with_progress(self, "Φόρτωση αρχείων…", job, done)
 
@@ -953,7 +999,9 @@ class MainWindow(QMainWindow):
             tbl.resizeColumnsToContents()
             att = f"{s.attenuation:.3f}" if s.attenuation is not None else "–"
             launch_txt = f"Launch {s.launch_km * 1000:.1f} m   ·   " if s.launch_km else ""
-            info = QLabel(f"{s.path.name}   ·   {launch_txt}Μήκος {units.fmt(s.length_km)} {units.name}   ·   "
+            dead = (f'   <b style="color:{FAIL_C.name()}">ΝΕΚΡΗ ΙΝΑ: δεν βρέθηκε ίνα μετά το launch cable</b>'
+                    if th.enabled and is_dead_fiber(s) else "")
+            info = QLabel(dead + f"   {s.path.name}   ·   {launch_txt}Μήκος {units.fmt(s.length_km)} {units.name}   ·   "
                           f"Απώλεια {s.total_loss or 0:.3f} dB   ·   {att} dB/km   ·   Παλμός {s.pulse_width_ns} ns")
             info.setStyleSheet("padding:4px")
             box = QWidget()
@@ -1008,22 +1056,67 @@ class MainWindow(QMainWindow):
                 return not w.cancelled
             return generate_reports(parts, out_dir, settings, prog)
 
-        def done(written, cancelled):
-            if cancelled and not written:
+        def done(result, cancelled):
+            # Ό,τι άλλαξε στον δίσκο (νέα μέτρηση, αρχείο που χάθηκε) φαίνεται και στην οθόνη
+            self.project.load([p for _, fibers in parts for f in fibers for p in f.paths])
+            self._refresh()
+            if result is None:
+                return
+            cancelled = cancelled or result.cancelled
+            if cancelled and not result:
                 self.statusBar().showMessage("Η δημιουργία PDF ακυρώθηκε.", 6000)
                 return
             box = QMessageBox(self)
             box.setWindowTitle(APP_NAME)
-            box.setIcon(QMessageBox.Information)
-            box.setText(f"Δημιουργήθηκαν {len(written)} PDF στον φάκελο:\n{out_dir}"
-                        + ("\n\n(Η διαδικασία ακυρώθηκε πριν τελειώσει.)" if cancelled else ""))
-            b_open = box.addButton("Άνοιγμα φακέλου", QMessageBox.AcceptRole)
+            problems = bool(result.excluded or result.unreadable)
+            box.setIcon(QMessageBox.Warning if problems or cancelled else QMessageBox.Information)
+            text = f"Δημιουργήθηκαν {len(result)} PDF στον φάκελο:\n{out_dir}"
+            if cancelled:
+                text += "\n\nΗ δημιουργία ακυρώθηκε πριν τελειώσει."
+            box.setText(text)
+            details = report_problems(result)
+            if details:
+                box.setInformativeText(details[:1500] + ("…" if len(details) > 1500 else ""))
+                box.setDetailedText(details)
+            b_open = box.addButton("Άνοιγμα φακέλου", QMessageBox.AcceptRole) if result else None
             box.addButton(QMessageBox.Close)
             box.exec()
-            if box.clickedButton() is b_open:
+            if b_open is not None and box.clickedButton() is b_open:
                 open_folder(out_dir)
 
         run_with_progress(self, "Δημιουργία PDF…", job, done)
+
+
+def load_message(res) -> str:
+    """Κείμενο αποτελέσματος φόρτωσης, π.χ. «Φορτώθηκαν 120 νέα αρχεία, 2 ενημερώθηκαν.»."""
+    if res.cancelled:
+        msg = f"Η φόρτωση ακυρώθηκε: φορτώθηκαν {res.loaded + res.updated} από {res.found} αρχεία."
+        if res.not_processed:
+            msg += f" {res.not_processed} δεν φορτώθηκαν· φόρτωσε ξανά τον φάκελο για να μπουν."
+        return msg
+    parts = [f"Φορτώθηκαν {res.loaded} νέα αρχεία"]
+    if res.updated:
+        parts.append(f"{res.updated} ξαναδιαβάστηκαν επειδή άλλαξαν")
+    if res.unchanged:
+        parts.append(f"{res.unchanged} ήταν ήδη φορτωμένα")
+    if res.failed:
+        parts.append(f"{len(res.failed)} δεν διαβάστηκαν")
+    return ", ".join(parts) + "."
+
+
+def report_problems(result) -> str:
+    """Λίστα με όσα δεν μπήκαν στο PDF και αρχεία που δεν διαβάστηκαν τη στιγμή της εξαγωγής."""
+    lines = []
+    if result.excluded:
+        lines.append(f"{len(result.excluded)} μετρήσεις ΔΕΝ μπήκαν στο PDF (λείπει μήκος κύματος — "
+                     "μη έγκυρες χωρίς 1310 και 1550):")
+        lines += [f"• {name}: λείπει {', '.join(f'{w} nm' for w in miss)}" for _c, name, miss in result.excluded]
+    if result.unreadable:
+        if lines:
+            lines.append("")
+        lines.append(f"{len(result.unreadable)} αρχεία δεν διαβάστηκαν τώρα (μετακινήθηκαν, σβήστηκαν ή χάλασαν):")
+        lines += [f"• {p.name}: {e}" for p, e in result.unreadable]
+    return "\n".join(lines)
 
 
 def selftest(out_dir: Path) -> int:

@@ -23,7 +23,10 @@ def test_one_pdf_per_cable(tmp_path):
     out = generate_reports(parts, tmp_path / "out", ReportSettings(),
                            lambda d, t, l: calls.append((d, t)) or True)
     assert [x.name for x in out] == ["FARM1.R01_SCP31_0001-0010.pdf", "FARM1.R01_SCP32_0001-0004.pdf"]
-    assert calls[-1] == (14, 14)
+    assert calls[-1] == (28, 28)                      # ανάγνωση + σελίδα για κάθε μέτρηση
+    # η 0003 δεν έχει 1550: μη έγκυρη, δεν μπαίνει στο PDF
+    assert out.excluded == [("FARM1.R01_SCP31", "FARM1.R01_SCP31_0003", [1550])]
+    assert not out.unreadable and not out.cancelled
     assert all(x.stat().st_size > 20_000 for x in out)
 
 
@@ -50,7 +53,9 @@ def test_real_grandway_file_in_report(tmp_path):
     sor = parse_sor(SAMPLE, with_trace=False)
     cable = Cable("GW")
     cable.fibers[(1, "")] = Fiber("GW", 1, "1", measurements={1550: Measurement(SAMPLE, 1550, sor)})
-    out = generate_reports([(cable, [cable.fiber(1)])], tmp_path, ReportSettings())
+    # μόνο 1550: μη έγκυρη μέτρηση → μπαίνει στο PDF μόνο αν το επιτρέψει ο χρήστης
+    assert generate_reports([(cable, [cable.fiber(1)])], tmp_path / "a", ReportSettings()) == []
+    out = generate_reports([(cable, [cable.fiber(1)])], tmp_path / "b", ReportSettings(allow_incomplete=True))
     assert out[0].stat().st_size > 10_000
     th = ReportSettings().thresholds
     assert evaluate(sor, th) is False  # connector 0.796 dB > 0.75

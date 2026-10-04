@@ -23,8 +23,8 @@ from reportlab.platypus import (Flowable, Image, KeepTogether, PageBreak, Paragr
                                 SimpleDocTemplate, Spacer, Table, TableStyle)
 
 from .matching import Cable, Fiber
-from .settings import ReportSettings, evaluate, event_ok, prepare
-from .sor import SorFile, downsample, parse_sor
+from .settings import ReportSettings, evaluate, event_ok, is_dead_fiber, prepare
+from .sor import SorError, SorFile, downsample, parse_sor
 
 FONT_DIR = Path(__file__).parent / "fonts"
 _fonts_ready = False
@@ -53,6 +53,7 @@ TEXT = {
         "otdr": "Όργανο", "generated": "Δημιουργήθηκε", "incomplete": "Μετρήσεις χωρίς όλα τα μήκη κύματος",
         "types": {"Αρχή": "Αρχή", "Τέλος": "Τέλος", "Ανακλαστικό": "Ανακλαστικό",
                   "Μη ανακλ.": "Μη ανακλ.", "Launch": "Launch", "seg": "Τμήμα"},
+        "dead": "Νεκρή ίνα στα {wl} nm: δεν βρέθηκε ίνα μετά το launch cable (FAIL).",
         "slope": "Κλίση (dB/km)", "criteria": "Κριτήρια PASS", "launch_cable": "Launch cable", "link_map": "Link map",
         "prepared": "Συντάχθηκε από", "verified": "Ελέγχθηκε από", "approved": "Εγκρίθηκε από",
     },
@@ -70,6 +71,7 @@ TEXT = {
         "otdr": "Instrument", "generated": "Generated", "incomplete": "Measurements missing a wavelength",
         "types": {"Αρχή": "Start", "Τέλος": "End", "Ανακλαστικό": "Reflective",
                   "Μη ανακλ.": "Non-refl.", "Launch": "Launch", "seg": "Seg."},
+        "dead": "Dead fiber at {wl} nm: no fiber found after the launch cable (FAIL).",
         "slope": "Slope (dB/km)", "criteria": "PASS criteria", "launch_cable": "Launch cable", "link_map": "Link map",
         "prepared": "Prepared by", "verified": "Verified by", "approved": "Approved by",
     },
@@ -339,12 +341,18 @@ def _tick_label(v):
     return f"{v:g}"
 
 
-def fiber_verdict(fiber: Fiber, wls: list[int], th) -> bool | str | None:
-    """True=PASS, False=FAIL, "missing"=λείπει μήκος κύματος, None=χωρίς κριτήρια."""
-    results = [evaluate(m.sor, th) for m in fiber.measurements.values()]
+def fiber_verdict(fiber: Fiber, wls: list[int], th, sors: dict[int, SorFile] | None = None) -> bool | str | None:
+    """True=PASS, False=FAIL, "missing"=λείπει μήκος κύματος, None=χωρίς κριτήρια.
+
+    Με `sors` κρίνονται οι μετρήσεις όπως διαβάστηκαν τώρα από τον δίσκο (για το PDF)·
+    χωρίς αυτό, όπως φορτώθηκαν (για την οθόνη).
+    """
+    if sors is None:
+        sors = {w: m.sor for w, m in fiber.measurements.items()}
+    results = [evaluate(s, th) for s in sors.values()]
     if any(r is False for r in results):
         return False
-    if set(fiber.measurements) != set(wls):
+    if not set(wls) <= set(sors):
         return "missing"
     if results and all(r is None for r in results):
         return None
@@ -459,11 +467,11 @@ class ReportBuilder:
         return self.t["pass"] if ok else self.t["fail"]
 
     # ---------- σελίδα σύνοψης ----------
-    def summary_story(self, cable: Cable, fibers: list[Fiber]):
+    def summary_story(self, cable: Cable, fibers: list[Fiber], read: dict):
         t = self.t
         th = self.s.thresholds
         wls = cable.wavelengths
-        units = Units(max((m.sor.length_km for f in fibers for m in f.measurements.values()), default=0))
+        units = Units(max((s.length_km for f in fibers for s in read[f.key].values()), default=0))
         story = [self._header(t["title"], f"{t['summary']}: <b>{_esc(cable.name)}</b>"), Spacer(1, 4 * mm)]
         info = f"{t['cable']}: <b>{_esc(cable.name)}</b> &nbsp; · &nbsp; {t['fibers']}: <b>{len(fibers)}</b>"
         info += " &nbsp; · &nbsp; λ: <b>" + ", ".join(f"{w} nm" for w in wls) + "</b>"
@@ -480,14 +488,15 @@ class ReportBuilder:
         n_pass = n_fail = 0
         for f in fibers:
             row = [f.display]
+            sors = read[f.key]
             for w in wls:
-                m = f.measurements.get(w)
-                if not m:
+                sor = sors.get(w)
+                if sor is None:
                     row += ["–", "–", "–", t["missing"]]
                     continue
-                row += [units.fmt(m.sor.length_km), _fmt(m.sor.total_loss, 2),
-                        _fmt(m.sor.attenuation, 3), self._verdict(evaluate(m.sor, th))]
-            v = fiber_verdict(f, wls, th)
+                row += [units.fmt(sor.length_km), _fmt(sor.total_loss, 2),
+                        _fmt(sor.attenuation, 3), self._verdict(evaluate(sor, th))]
+            v = fiber_verdict(f, wls, th, sors)
             row.append(self._verdict(v))
             n_pass += v is True
             n_fail += v is False
@@ -503,7 +512,7 @@ class ReportBuilder:
             story.append(Paragraph(
                 f"{t['pass']}: <b>{n_pass}</b> &nbsp; · &nbsp; {t['fail']}: <b>{n_fail}</b>", self.st["n"]))
             story.append(Paragraph(f"{t['criteria']}: {_esc(crit)}", self.st["small"]))
-        miss = [f.display for f in fibers if set(f.measurements) != set(wls)]
+        miss = [f.display for f in fibers if not set(wls) <= set(read[f.key])]
         if miss:
             story.append(Paragraph(f"{t['incomplete']}: " + ", ".join(miss), self.st["small"]))
         story.append(PageBreak())
@@ -517,7 +526,7 @@ class ReportBuilder:
         present = [sors[w] for w in wls if w in sors]
         units = Units(max((s.length_km for s in present), default=0))
         subtitle = f"{t['cable']}: {_esc(cable.name)} &nbsp; · &nbsp; {t['fiber']}: <b>{_esc(fiber.display)}</b>"
-        story = [self._header(t["title"], subtitle, fiber_verdict(fiber, wls, th)), Spacer(1, 3 * mm)]
+        story = [self._header(t["title"], subtitle, fiber_verdict(fiber, wls, th, sors)), Spacer(1, 3 * mm)]
 
         head = [t["wl"], t["file"], t["date"], t["pulse"], t["ior"], f"{t['launch']} (m)",
                 f"{t['length']} ({units.name})", t["loss"], t["att"], t["result"]]
@@ -537,6 +546,10 @@ class ReportBuilder:
             ])
         widths = [11 * mm, 45 * mm, 23 * mm, 13 * mm, 13 * mm, 14 * mm, 16 * mm, 16 * mm, 12 * mm, 23 * mm]
         story.append(self._table(rows, widths, result_col=9))
+        for s in present:
+            if th.enabled and is_dead_fiber(s):
+                story.append(Paragraph(f'<font color="{FAIL_C.hexval()}"><b>{_esc(t["dead"].format(wl=s.wavelength))}</b></font>',
+                                       self.st["n"]))
         story.append(Spacer(1, 2 * mm))
 
         chart_w = A4[0] - 24 * mm
@@ -584,27 +597,16 @@ class ReportBuilder:
         return self._table(rows, widths, result_col=7, muted_rows=muted)
 
     # ---------- κατασκευή αρχείου ----------
-    def build(self, out_path: Path, parts: list[tuple[Cable, list[Fiber]]],
-              progress: Callable[[int, int, str], bool] | None = None) -> bool:
-        total = sum(len(f) for _, f in parts)
-        done = 0
+    def build(self, out_path: Path, parts: list[tuple[Cable, list[Fiber], dict]],
+              progress: Callable[[str], bool] | None = None) -> bool:
+        """parts: (καλώδιο, μετρήσεις, read) όπου read[fiber.key] = {λ: SorFile διαβασμένο τώρα}."""
         story = []
-        for cable, fibers in parts:
-            for f in fibers:
-                for m in f.measurements.values():
-                    prepare(m.sor, self.s)
+        for cable, fibers, read in parts:
             if self.s.summary_page:
-                story += self.summary_story(cable, fibers)
+                story += self.summary_story(cable, fibers, read)
             for fiber in fibers:
-                sors = {}
-                for w, m in fiber.measurements.items():
-                    try:
-                        sors[w] = prepare(parse_sor(m.path), self.s)
-                    except Exception:
-                        pass
-                story += self.fiber_story(cable, fiber, sors)
-                done += 1
-                if progress and progress(done, total, f"{cable.name} / {fiber.display}") is False:
+                story += self.fiber_story(cable, fiber, read[fiber.key])
+                if progress and progress(f"{cable.name} / {fiber.display}") is False:
                     return False
         if story and isinstance(story[-1], PageBreak):
             story.pop()
@@ -631,7 +633,7 @@ class ReportBuilder:
         tmp = out_path.with_suffix(".part.pdf")
         doc = SimpleDocTemplate(str(tmp), pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
                                 topMargin=10 * mm, bottomMargin=(21 if signatures else 14) * mm,
-                                title=f"{t['title']} – " + ", ".join(c.name for c, _ in parts),
+                                title=f"{t['title']} – " + ", ".join(p[0].name for p in parts),
                                 author=self.s.company or "")
         doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
         tmp.replace(out_path)
@@ -701,30 +703,79 @@ def safe_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .") or "report"
 
 
+class ReportResult(list):
+    """Τα PDF που γράφτηκαν (λίστα διαδρομών), μαζί με όσα δεν μπήκαν και γιατί."""
+
+    def __init__(self):
+        super().__init__()
+        self.excluded: list[tuple[str, str, list[int]]] = []   # (καλώδιο, μέτρηση, λ που λείπουν)
+        self.unreadable: list[tuple[Path, str]] = []            # αρχεία που δεν διαβάστηκαν τώρα
+        self.cancelled = False
+
+
 def generate_reports(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path, settings: ReportSettings,
-                     progress: Callable[[int, int, str], bool] | None = None) -> list[Path]:
-    """Δημιουργεί τα PDF. Επιστρέφει τις διαδρομές που γράφτηκαν."""
+                     progress: Callable[[int, int, str], bool] | None = None) -> ReportResult:
+    """Δημιουργεί τα PDF.
+
+    Κάθε αρχείο ξαναδιαβάζεται τώρα από τον δίσκο και αυτό που διαβάστηκε χρησιμοποιείται
+    παντού (σύνοψη, σελίδα, PASS/FAIL). Μέτρηση χωρίς όλα τα μήκη κύματος (π.χ. 1310 και 1550),
+    είτε γιατί λείπει είτε γιατί δεν διαβάζεται πια, δεν μπαίνει στο PDF εκτός αν
+    `settings.allow_incomplete` (επιλογή του χρήστη, με δική του ευθύνη).
+    """
     out_dir = Path(out_dir)
     builder = ReportBuilder(settings)
-    written: list[Path] = []
-    if settings.one_pdf_per_cable:
-        total = sum(len(f) for _, f in parts)
-        offset = 0
-        for cable, fibers in parts:
-            if not fibers:
-                continue
-            def sub(done, _tot, label, _o=offset):
-                return progress(_o + done, total, label) if progress else True
+    result = ReportResult()
+    total = 2 * sum(len(f) for _, f in parts)
+    step = 0
+
+    def tick(label: str) -> bool:
+        nonlocal step
+        step += 1
+        return progress(step, total, label) if progress else True
+
+    def read_cable(cable: Cable, fibers: list[Fiber]):
+        wls = set(cable.wavelengths)
+        keep, read = [], {}
+        for f in fibers:
+            sors = {}
+            for w, m in f.measurements.items():
+                try:
+                    sors[w] = prepare(parse_sor(m.path), settings)
+                except (SorError, OSError, ValueError) as e:
+                    result.unreadable.append((m.path, str(e)))
+            missing = sorted(wls - set(sors))
+            if missing and not settings.allow_incomplete:
+                result.excluded.append((cable.name, f.display, missing))
+                tick("")                                  # δεν θα χτιστεί σελίδα
+            else:
+                keep.append(f)
+                read[f.key] = sors
+            if not tick(f"Ανάγνωση: {cable.name} / {f.display}"):
+                return None
+        return cable, keep, read
+
+    groups = [[p] for p in parts] if settings.one_pdf_per_cable else [parts]
+    for group in groups:
+        prepared = []
+        for cable, fibers in group:
+            r = read_cable(cable, fibers)
+            if r is None:
+                result.cancelled = True
+                return result
+            if r[1]:
+                prepared.append(r)
+        if not prepared:
+            continue
+        if settings.one_pdf_per_cable:
+            cable, fibers, _ = prepared[0]
             out = out_dir / f"{safe_filename(cable.name)}{_range_suffix(fibers)}.pdf"
-            if not builder.build(out, [(cable, fibers)], sub):
-                return written
-            written.append(out)
-            offset += len(fibers)
-    else:
-        out = out_dir / f"OTDR_report_{datetime.now():%Y%m%d_%H%M}.pdf"
-        if builder.build(out, [p for p in parts if p[1]], progress):
-            written.append(out)
-    return written
+        else:
+            out = out_dir / f"OTDR_report_{datetime.now():%Y%m%d_%H%M}.pdf"
+        if not builder.build(out, prepared, tick):
+            result.cancelled = True
+            return result
+        result.append(out)
+    return result
 
 
 def _range_suffix(fibers: list[Fiber]) -> str:

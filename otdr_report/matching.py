@@ -14,6 +14,8 @@ from typing import Callable, Iterable
 from .sor import SorError, SorFile, parse_sor
 
 KNOWN_WAVELENGTHS = (850, 1300, 1310, 1383, 1490, 1550, 1625, 1650)
+# Έγκυρη μέτρηση = και τα δύο μήκη κύματος (απόφαση χρήστη). Όποια λείπει → ΕΛΛΙΠΗΣ.
+REQUIRED_WAVELENGTHS = frozenset({1310, 1550})
 _WL = "|".join(str(w) for w in KNOWN_WAVELENGTHS)
 _SEP = r"[_\-. ]"
 
@@ -100,6 +102,7 @@ class Fiber:
 class Cable:
     name: str
     fibers: dict[tuple[int, str], Fiber] = field(default_factory=dict)
+    required: frozenset[int] = REQUIRED_WAVELENGTHS
 
     def sorted_fibers(self) -> list[Fiber]:
         return [self.fibers[k] for k in sorted(self.fibers, key=lambda k: (k[0], _natural_key(k[1])))]
@@ -109,7 +112,8 @@ class Cable:
 
     @property
     def wavelengths(self) -> list[int]:
-        s: set[int] = set()
+        """Τα υποχρεωτικά μήκη κύματος (1310, 1550) και όσα άλλα υπάρχουν στο καλώδιο."""
+        s: set[int] = set(self.required)
         for f in self.fibers.values():
             s.update(f.measurements)
         return sorted(s)
@@ -134,8 +138,10 @@ class Project:
     cables: dict[str, Cable] = field(default_factory=dict)
     errors: list[tuple[Path, str]] = field(default_factory=list)
     group_level: int | None = None
+    required: frozenset[int] = REQUIRED_WAVELENGTHS
     _items: list[tuple[Path, SorFile, NameInfo]] = field(default_factory=list)
     _seen: set[Path] = field(default_factory=set)
+    _stat: dict[Path, tuple[float, int]] = field(default_factory=dict)
     _level_used: int = 0
 
     def sorted_cables(self) -> list[Cable]:
@@ -171,6 +177,8 @@ class Project:
         if removed:
             self._items = [it for it in self._items if it[0] not in targets]
             self._seen.difference_update(removed)
+            for p in removed:
+                self._stat.pop(p, None)
             self.regroup()
         return removed
 
@@ -217,7 +225,7 @@ class Project:
             wl = info.wavelength or sor.wavelength
             level = self.group_level or levels[_parts(info.cable)[0]]
             name, sub = self._split(info, level)
-            cable = self.cables.setdefault(name, Cable(name))
+            cable = self.cables.setdefault(name, Cable(name, required=self.required))
             fiber = cable.fibers.get((info.fiber, sub))
             if fiber is None:
                 fiber = cable.fibers[(info.fiber, sub)] = Fiber(
@@ -228,32 +236,81 @@ class Project:
                 fiber.measurements[wl] = Measurement(path, wl, sor)
 
     def load(self, paths: Iterable[Path], progress: Callable[[int, int], bool] | None = None,
-             workers: int = 8) -> None:
-        new = []
+             workers: int = 8) -> "LoadResult":
+        """Φορτώνει αρχεία .sor. Αρχεία που έχουν ήδη φορτωθεί ξαναδιαβάζονται μόνο αν άλλαξαν.
+
+        Ένα αρχείο σημειώνεται ως φορτωμένο μόνο αφού διαβαστεί επιτυχώς: μετά από ακύρωση ή
+        σφάλμα ανάγνωσης, η επόμενη φόρτωση το ξαναδοκιμάζει.
+        """
+        res = LoadResult()
+        todo, queued = [], set()
         for p in paths:
             p = Path(p).resolve()
-            if p not in self._seen:
-                self._seen.add(p)
-                new.append(p)
-        new.sort(key=lambda p: _natural_key(p.name))
+            if p in queued:
+                continue
+            queued.add(p)
+            res.found += 1
+            if p in self._seen and self._stat.get(p) == _file_stat(p):
+                res.unchanged += 1
+                continue
+            todo.append(p)
+        todo.sort(key=lambda p: (_natural_key(p.name), str(p)))
 
         def work(p: Path):
             try:
-                return p, parse_sor(p, with_trace=False), None
+                return p, _file_stat(p), parse_sor(p, with_trace=False), None
             except (SorError, OSError, ValueError) as e:
-                return p, None, str(e)
+                return p, None, None, str(e)
 
-        total = len(new)
+        index = {it[0]: i for i, it in enumerate(self._items)}
+        total = len(todo)
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for i, (p, sor, err) in enumerate(ex.map(work, new), 1):
+            for i, (p, st, sor, err) in enumerate(ex.map(work, todo), 1):
                 if err:
                     self.errors.append((p, err))
+                    res.failed.append((p, err))
+                    if p in index:                       # ήταν φορτωμένο αλλά τώρα δεν διαβάζεται
+                        self._items[index.pop(p)] = None  # type: ignore[call-overload]
+                        self._seen.discard(p)
+                        self._stat.pop(p, None)
                 else:
-                    self._items.append((p, sor, parse_name(p)))
+                    item = (p, sor, parse_name(p))
+                    if p in index:
+                        self._items[index[p]] = item
+                        res.updated += 1
+                    else:
+                        index[p] = len(self._items)
+                        self._items.append(item)
+                        res.loaded += 1
+                    self._seen.add(p)
+                    self._stat[p] = st
                 if progress and progress(i, total) is False:
+                    res.cancelled = True
+                    res.not_processed = total - i
                     ex.shutdown(cancel_futures=True)
                     break
+        self._items = [it for it in self._items if it is not None]
         self.regroup()
+        return res
+
+
+@dataclass
+class LoadResult:
+    found: int = 0              # αρχεία που ζητήθηκαν
+    loaded: int = 0             # νέα
+    updated: int = 0            # ήδη φορτωμένα που άλλαξαν στον δίσκο και ξαναδιαβάστηκαν
+    unchanged: int = 0          # ήδη φορτωμένα, χωρίς αλλαγή
+    failed: list[tuple[Path, str]] = field(default_factory=list)
+    cancelled: bool = False
+    not_processed: int = 0      # δεν πρόλαβαν να διαβαστούν λόγω ακύρωσης
+
+
+def _file_stat(p: Path) -> tuple[float, int] | None:
+    try:
+        st = p.stat()
+        return st.st_mtime, st.st_size
+    except OSError:
+        return None
 
 
 def find_sor_files(folder: str | Path) -> list[Path]:

@@ -42,6 +42,9 @@ class ReportSettings:
     signatures: bool = True              # γραμμές "Συντάχθηκε / Ελέγχθηκε / Εγκρίθηκε"
     launch_mode: str = "file"            # "file" (από το όργανο), "manual" ή "none"
     launch_m: float = 0.0                # για launch_mode == "manual"
+    # Μέτρηση χωρίς 1310 ΚΑΙ 1550 δεν είναι έγκυρη και δεν μπαίνει στο PDF.
+    # Μόνο ο χρήστης μπορεί να το επιτρέψει, με δική του ευθύνη.
+    allow_incomplete: bool = False
     thresholds: Thresholds = field(default_factory=Thresholds)
 
     def to_json(self) -> str:
@@ -95,10 +98,26 @@ def event_ok(e: Event, th: Thresholds) -> bool | None:
     return True if checked else None
 
 
+# Κάτω από αυτό το μήκος (μετά το launch cable) η ίνα θεωρείται νεκρή / κομμένη.
+DEAD_FIBER_KM = 0.002
+
+
+def is_dead_fiber(sor: SorFile) -> bool:
+    """Δεν υπάρχει ίνα μετά το launch cable: χωρίς συμβάντα ή μήκος ≈ 0."""
+    return not sor.events or sor.length_km < DEAD_FIBER_KM
+
+
 def evaluate(sor: SorFile, th: Thresholds) -> bool | None:
-    """Συνολικό αποτέλεσμα μέτρησης: True=PASS, False=FAIL, None=χωρίς έλεγχο."""
-    if not th.enabled or not any((th.check_splice, th.check_connector, th.check_reflectance,
-                                  th.check_attenuation, th.check_total_loss)):
+    """Συνολικό αποτέλεσμα μέτρησης: True=PASS, False=FAIL, None=χωρίς έλεγχο.
+
+    Νεκρή ίνα (δεν βρέθηκε ίνα μετά το launch cable) είναι πάντα FAIL όταν υπάρχει έλεγχος.
+    """
+    if not th.enabled:
+        return None
+    if is_dead_fiber(sor):
+        return False
+    if not any((th.check_splice, th.check_connector, th.check_reflectance,
+                th.check_attenuation, th.check_total_loss)):
         return None
     for e in sor.events:
         if event_ok(e, th) is False:

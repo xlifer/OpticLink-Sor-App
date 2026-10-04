@@ -143,3 +143,37 @@ def test_remove_whole_cable_from_tree(win):
     win._remove_paths(paths, "test")
     assert win.project.file_count == 0 and win.tree.topLevelItemCount() == 0
     assert len(win._removed) == 79
+
+
+def test_finished_job_is_not_reported_as_cancelled(qapp):
+    """δ) Το κλείσιμο του παραθύρου προόδου δεν πρέπει να μετράει ως «Ακύρωση»."""
+    got = []
+    parent = QtWidgets.QWidget()        # όπως στην εφαρμογή: γονέας το κύριο παράθυρο
+    appmod.run_with_progress(parent, "test", lambda w: 42, lambda res, cancelled: got.append((res, cancelled)))
+    wait(qapp, lambda: got)
+    assert got == [(42, False)]
+    wait(qapp, lambda: all(not t.isRunning() for t in parent.findChildren(appmod.QThread)))
+
+
+def test_cancel_button_is_reported(qapp):
+    got = []
+
+    def job(w):
+        while not w.cancelled:
+            time.sleep(0.01)
+        return "stopped"
+    parent = QtWidgets.QWidget()
+    j = appmod.run_with_progress(parent, "test", job, lambda res, cancelled: got.append((res, cancelled)))
+    wait(qapp, lambda: j.dlg.isVisible())
+    j.dlg.canceled.emit()                # όπως το κλικ στο κουμπί «Ακύρωση»
+    wait(qapp, lambda: got)
+    assert got == [("stopped", True)]
+    wait(qapp, lambda: all(not t.isRunning() for t in parent.findChildren(appmod.QThread)))
+
+
+def test_load_message_texts():
+    from otdr_report.matching import LoadResult
+    assert appmod.load_message(LoadResult(found=40, loaded=35, unchanged=5)) == \
+        "Φορτώθηκαν 35 νέα αρχεία, 5 ήταν ήδη φορτωμένα."
+    msg = appmod.load_message(LoadResult(found=40, loaded=5, cancelled=True, not_processed=35))
+    assert msg.startswith("Η φόρτωση ακυρώθηκε: φορτώθηκαν 5 από 40 αρχεία.")
