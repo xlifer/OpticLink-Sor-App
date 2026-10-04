@@ -31,11 +31,12 @@ def test_moved_files_never_pass(tmp_path):
     out = generate_reports([(c, c.sorted_fibers()) for c in p.sorted_cables()], tmp_path / "out", ReportSettings())
     assert out == []                                       # τίποτα δεν διαβάζεται → καμία έγκυρη μέτρηση
     assert len(out.unreadable) == 6 and len(out.excluded) == 3
+    # PDF στα αγγλικά: το pdftotext των Windows δεν βγάζει ελληνικά κείμενα
     out = generate_reports([(c, c.sorted_fibers()) for c in p.sorted_cables()], tmp_path / "out2",
-                           ReportSettings(allow_incomplete=True))
+                           ReportSettings(allow_incomplete=True, language="en"))
     txt = pdf_text(out[0])
-    verdict_pass = re.findall(r"(?<!Κριτήρια )\bPASS\b(?!:)", txt)   # όχι «PASS: 0» / «Κριτήρια PASS»
-    assert verdict_pass == [] and "ΕΛΛΙΠΗΣ" in txt and "PASS: 0" in txt
+    verdict_pass = re.findall(r"\bPASS\b(?!:| criteria)", txt)       # όχι «PASS: 0» / «PASS criteria»
+    assert verdict_pass == [] and "INCOMPLETE" in txt and "PASS: 0" in txt
 
 
 def test_replaced_file_uses_new_measurement(tmp_path):
@@ -45,13 +46,14 @@ def test_replaced_file_uses_new_measurement(tmp_path):
     # ξαναμέτρηση της 0002 στα 1550 με κακή κόλληση 0.95 dB
     bad = build_sor(1550, 2.0, [(0.25, 0.3, -48.0), (0.9, 0.95, 0)], seed=7, cable="C2", fiber="0002")
     (tmp_path / "C2_1550_0002.sor").write_bytes(bad)
-    out = generate_reports([(c, c.sorted_fibers()) for c in p.sorted_cables()], tmp_path / "out", ReportSettings())
+    out = generate_reports([(c, c.sorted_fibers()) for c in p.sorted_cables()], tmp_path / "out",
+                           ReportSettings(language="en"))
     txt = pdf_text(out[0])
     summary = txt.split("\f")[0]
     row = next(line for line in summary.splitlines() if "C2_0002" in line)
     assert row.rstrip().endswith("FAIL")                   # η σύνοψη βλέπει τη νέα μέτρηση
     assert "PASS: 1" in summary and "FAIL: 1" in summary
-    page = next(pg for pg in txt.split("\f") if "Μέτρηση: C2_0002" in pg)
+    page = next(pg for pg in txt.split("\f") if "Measurement: C2_0002" in pg)
     assert "FAIL" in page.splitlines()[0] or "FAIL" in page[:400]
     # και η επόμενη φόρτωση ξαναδιαβάζει το αρχείο που άλλαξε
     res = p.load(find_sor_files(tmp_path))
