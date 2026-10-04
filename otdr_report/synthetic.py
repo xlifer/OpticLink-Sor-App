@@ -18,8 +18,13 @@ def _s(text: str) -> bytes:
 
 
 def build_sor(wavelength: int, length_km: float, events: list[tuple[float, float, float]],
-              ior: float = 1.4682, seed: int = 0, cable: str = "", fiber: str = "") -> bytes:
-    """events: (km, loss dB, reflectance dB ή 0 για μη ανακλαστικό)."""
+              ior: float = 1.4682, seed: int = 0, cable: str = "", fiber: str = "",
+              launch_m: float = 0.0) -> bytes:
+    """events: (km, loss dB, reflectance dB ή 0 για μη ανακλαστικό).
+
+    Με launch_m > 0 προστίθεται launch cable όπως στο FHO5000: connector στο τέλος του
+    launch και το μήκος του στο GenParams user offset. Αποστάσεις/μήκος μετρούν από το OTDR.
+    """
     rnd = random.Random(seed)
     att = 0.33 if wavelength < 1400 else 0.19
     res_km = 0.002 if length_km < 20 else 0.008
@@ -46,8 +51,10 @@ def build_sor(wavelength: int, length_km: float, events: list[tuple[float, float
                 v -= 8
         y.append(max(0, min(65.0, v)))
 
+    user_offset = int(launch_m / 1000 / km_per_tof) if launch_m else 0
     gen = b"GenParams\0" + b"EN" + _s(cable) + _s(fiber) + struct.pack("<HH", 652, wavelength)
-    gen += _s("A") + _s("B") + _s("") + b"BC" + struct.pack("<ii", 0, 0) + _s("tester") + _s("")
+    gen += _s("A") + _s("B") + _s("") + b"BC" + struct.pack("<ii", user_offset, int(launch_m * 10))
+    gen += _s("tester") + _s("")
     sup = b"SupParams\0" + b"".join(_s(x) for x in ("Grandway", "FHO5000", "SN123", "", "", "2.2.8", ""))
     fxd = b"FxdParams\0" + struct.pack("<I", int(time.time())) + b"km" + struct.pack("<H", wavelength * 10)
     fxd += struct.pack("<ii", 0, 0) + struct.pack("<H", 1) + struct.pack("<H", 100)
@@ -86,7 +93,7 @@ def build_sor(wavelength: int, length_km: float, events: list[tuple[float, float
 
 
 def make_cable(folder: Path, cable: str, fibers: int, wavelengths=(1310, 1550),
-               skip: set[int] = frozenset(), seed: int = 1) -> list[Path]:
+               skip: set[int] = frozenset(), seed: int = 1, launch_m: float = 0.0) -> list[Path]:
     folder.mkdir(parents=True, exist_ok=True)
     rnd = random.Random(seed)
     length = round(rnd.uniform(1.5, 6.0), 3)
@@ -95,14 +102,17 @@ def make_cable(folder: Path, cable: str, fibers: int, wavelengths=(1310, 1550),
         evs = [(round(length * k / 4 + rnd.uniform(-0.05, 0.05), 3), round(rnd.uniform(0.02, 0.25), 3), 0)
                for k in (1, 2, 3)]
         evs.insert(0, (0.25, round(rnd.uniform(0.2, 0.5), 3), -48.0))  # connector
+        if launch_m:
+            evs = [(round(km + launch_m / 1000, 4), l, r) for km, l, r in evs]
+            evs.insert(0, (launch_m / 1000, round(rnd.uniform(0.3, 0.55), 3), -50.0))  # τέλος launch
         if f % 37 == 0:
             evs[2] = (evs[2][0], 0.55, 0)  # κακή κόλληση → FAIL
         for wl in wavelengths:
             if (f, wl) in skip:
                 continue
             scale = 1.0 if wl < 1400 else 1.15
-            data = build_sor(wl, length, [(km, round(l * scale, 3), r) for km, l, r in evs],
-                             seed=f * 10 + wl, cable=cable, fiber=f"{f:04d}")
+            data = build_sor(wl, length + launch_m / 1000, [(km, round(l * scale, 3), r) for km, l, r in evs],
+                             seed=f * 10 + wl, cable=cable, fiber=f"{f:04d}", launch_m=launch_m)
             p = folder / f"{cable}_{wl}_{f:04d}.sor"
             p.write_bytes(data)
             out.append(p)
@@ -114,6 +124,7 @@ if __name__ == "__main__":
     ap.add_argument("folder", type=Path)
     ap.add_argument("--cable", default="FARM1.R01_SCP31")
     ap.add_argument("--fibers", type=int, default=300)
+    ap.add_argument("--launch", type=float, default=0.0, help="launch cable σε μέτρα")
     a = ap.parse_args()
-    files = make_cable(a.folder, a.cable, a.fibers)
+    files = make_cable(a.folder, a.cable, a.fibers, launch_m=a.launch)
     print(f"{len(files)} αρχεία στο {a.folder}")

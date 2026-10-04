@@ -21,6 +21,8 @@ _SEP = r"[_\-. ]"
 _RE_WL_FIBER = re.compile(rf"^(?P<cable>.+?){_SEP}(?P<wl>{_WL})(?:nm)?{_SEP}(?P<fiber>\d+)$", re.I)
 # <καλώδιο>_<ίνα>_<λ>  π.χ. FARM1.R01_SCP31_0117_1310
 _RE_FIBER_WL = re.compile(rf"^(?P<cable>.+?){_SEP}(?P<fiber>\d+){_SEP}(?P<wl>{_WL})(?:nm)?$", re.I)
+# <όνομα>_<λ>  π.χ. ROUTE7_1550 (χωρίς αριθμό ίνας)
+_RE_WL_ONLY = re.compile(rf"^(?P<cable>.+?){_SEP}(?P<wl>{_WL})(?:nm)?$", re.I)
 # <καλώδιο>_<ίνα>  (το μήκος κύματος διαβάζεται από το αρχείο)
 _RE_FIBER = re.compile(rf"^(?P<cable>.+?){_SEP}(?P<fiber>\d+)$")
 
@@ -33,12 +35,23 @@ class NameInfo:
     wavelength: int | None
 
 
+def pair_name(path: str | Path, info: NameInfo | None = None) -> str:
+    """Όνομα αρχείου χωρίς το μήκος κύματος: FARM1.R01_SCP31_1310_0117.sor → FARM1.R01_SCP31_0117."""
+    info = info or parse_name(path)
+    if info.fiber_label:
+        return f"{info.cable}_{info.fiber_label}"
+    return info.cable if info.wavelength else Path(path).stem
+
+
 def parse_name(path: str | Path) -> NameInfo:
     stem = Path(path).stem
     for rx in (_RE_WL_FIBER, _RE_FIBER_WL):
         m = rx.match(stem)
         if m:
             return NameInfo(m["cable"], int(m["fiber"]), m["fiber"], int(m["wl"]))
+    m = _RE_WL_ONLY.match(stem)
+    if m:
+        return NameInfo(m["cable"], 0, "", int(m["wl"]))
     m = _RE_FIBER.match(stem)
     if m:
         return NameInfo(m["cable"], int(m["fiber"]), m["fiber"], None)
@@ -60,6 +73,7 @@ class Fiber:
     sub: str = ""          # μέρος του ονόματος που δεν μπήκε στο καλώδιο (π.χ. "dis_101")
     measurements: dict[int, Measurement] = field(default_factory=dict)
     duplicates: list[Path] = field(default_factory=list)
+    name: str = ""         # όνομα αρχείου χωρίς μήκος κύματος, π.χ. "scp51_dis_101_0001"
 
     @property
     def key(self) -> tuple[int, str]:
@@ -67,6 +81,8 @@ class Fiber:
 
     @property
     def display(self) -> str:
+        if self.name:
+            return self.name
         label = self.label or str(self.number)
         return f"{label} · {self.sub}" if self.sub else label
 
@@ -185,7 +201,8 @@ class Project:
             cable = self.cables.setdefault(name, Cable(name))
             fiber = cable.fibers.get((info.fiber, sub))
             if fiber is None:
-                fiber = cable.fibers[(info.fiber, sub)] = Fiber(name, info.fiber, info.fiber_label, sub)
+                fiber = cable.fibers[(info.fiber, sub)] = Fiber(
+                    name, info.fiber, info.fiber_label, sub, name=pair_name(path, info))
             if wl in fiber.measurements:
                 fiber.duplicates.append(path)
             else:

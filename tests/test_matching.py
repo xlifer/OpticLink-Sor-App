@@ -46,4 +46,24 @@ def test_auto_grouping_keeps_single_cable_name(tmp_path):
     p = Project()
     p.load(find_sor_files(tmp_path))
     assert list(p.cables) == ["FARM1.R01_SCP31"]
-    assert [f.display for f in p.cables["FARM1.R01_SCP31"].sorted_fibers()] == ["0001", "0002", "0003", "0004"]
+    assert [f.display for f in p.cables["FARM1.R01_SCP31"].sorted_fibers()] == [
+        "FARM1.R01_SCP31_0001", "FARM1.R01_SCP31_0002", "FARM1.R01_SCP31_0003", "FARM1.R01_SCP31_0004"]
+
+
+def test_name_with_only_wavelength_pairs():
+    from otdr_report.matching import pair_name
+    n = parse_name("ROUTE7_1550.sor")
+    assert (n.cable, n.fiber, n.wavelength) == ("ROUTE7", 0, 1550)
+    assert pair_name("ROUTE7_1550.sor") == "ROUTE7"
+
+
+def test_synthetic_launch_cable(tmp_path):
+    from otdr_report.settings import ReportSettings, prepare
+    make_cable(tmp_path, "L_SCP1", 2, launch_m=100.0)
+    p = Project()
+    p.load(find_sor_files(tmp_path))
+    m = p.cables["L_SCP1"].fiber(1).measurements[1310]
+    s = prepare(m.sor, ReportSettings())
+    assert abs(s.launch_km - 0.1) < 0.002
+    assert s.events[0].role == "launch" and s.events[1].role == "start"
+    assert s.events[1].rel_km == 0

@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 
 from . import __version__
 from .matching import Cable, Fiber, Project, find_sor_files
-from .pdf_report import generate_reports
-from .settings import ReportSettings, evaluate, event_ok
+from .pdf_report import TEXT, Units, event_headers, event_rows, generate_reports
+from .settings import ReportSettings, evaluate, prepare
 from .sor import parse_sor
 
 APP_NAME = "OTDR Batch Report"
@@ -152,6 +152,22 @@ class SettingsDialog(QDialog):
         f1.addRow("Τεχνικός", self.operator)
         f1.addRow("Γλώσσα PDF", self.language)
         f1.addRow("Γράφημα", self.chart)
+        self.launch_mode = QComboBox()
+        self.launch_mode.addItem("Από το αρχείο (όπως το έχει ρυθμίσει το όργανο)", "file")
+        self.launch_mode.addItem("Χειροκίνητα", "manual")
+        self.launch_mode.addItem("Χωρίς launch cable", "none")
+        self.launch_mode.setCurrentIndex(max(0, self.launch_mode.findData(s.launch_mode)))
+        self.launch_m = QDoubleSpinBox()
+        self.launch_m.setRange(0, 50000); self.launch_m.setDecimals(1); self.launch_m.setSuffix(" m")
+        self.launch_m.setValue(s.launch_m)
+        self.launch_m.setEnabled(s.launch_mode == "manual")
+        self.launch_mode.currentIndexChanged.connect(
+            lambda _i: self.launch_m.setEnabled(self.launch_mode.currentData() == "manual"))
+        lrow = QHBoxLayout(); lrow.addWidget(self.launch_mode, 1); lrow.addWidget(self.launch_m)
+        f1.addRow("Launch cable", lrow)
+        self.signatures = QCheckBox("Γραμμές υπογραφών (Συντάχθηκε / Ελέγχθηκε / Εγκρίθηκε)")
+        self.signatures.setChecked(s.signatures)
+        f1.addRow("", self.signatures)
         lay.addWidget(g1)
 
         th = s.thresholds
@@ -216,6 +232,9 @@ class SettingsDialog(QDialog):
         s.operator = self.operator.text().strip()
         s.language = self.language.currentData()
         s.chart_mode = self.chart.currentData()
+        s.launch_mode = self.launch_mode.currentData()
+        s.launch_m = self.launch_m.value()
+        s.signatures = self.signatures.isChecked()
         th = s.thresholds
         th.enabled = self.g2.isChecked()
         th.check_splice = self.cb_splice.isChecked()
@@ -360,7 +379,7 @@ class MainWindow(QMainWindow):
 
         # Αριστερά: καλώδια
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Καλώδιο", "Ίνες", "Ελλιπείς", "FAIL"])
+        self.tree.setHeaderLabels(["Καλώδιο", "Μετρήσεις", "Ελλιπείς", "FAIL"])
         self.tree.setRootIsDecorated(False)
         hdr = self.tree.header()
         hdr.setStretchLastSection(False)
@@ -382,14 +401,17 @@ class MainWindow(QMainWindow):
         pg.setConfigOptions(antialias=True, background="w", foreground="#333")
         self.plot = pg.PlotWidget()
         self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.plot.setLabel("bottom", "Απόσταση", units="km")
+        self.plot.setLabel("bottom", "Απόσταση (km)")
         self.plot.setLabel("left", "dB")
-        self.plot.addLegend(offset=(-10, 10))
+        self.plot.addLegend(offset=(70, 10), labelTextSize="8pt")
         self.events_tabs = QTabWidget()
 
         bottom = QSplitter(Qt.Horizontal)
         bottom.addWidget(self.plot)
         bottom.addWidget(self.events_tabs)
+        bottom.setStretchFactor(0, 3)
+        bottom.setStretchFactor(1, 2)
+        self.events_tabs.setMinimumWidth(300)
         bottom.setSizes([850, 550])
 
         right = QSplitter(Qt.Vertical)
@@ -500,6 +522,10 @@ class MainWindow(QMainWindow):
 
     # ---------- προβολή
     def _refresh(self):
+        for c in self.project.cables.values():
+            for f in c.fibers.values():
+                for m in f.measurements.values():
+                    prepare(m.sor, self.settings)
         self._fill_group_combo()
         self.tree.clear()
         th = self.settings.thresholds
@@ -536,9 +562,11 @@ class MainWindow(QMainWindow):
             self._show_fiber(None)
             return
         wls = cable.wavelengths
-        heads = ["Ίνα"]
+        units = Units(max((m.sor.length_km for f in cable.fibers.values()
+                           for m in f.measurements.values()), default=0))
+        heads = ["Μέτρηση"]
         for w in wls:
-            heads += [f"{w} Μήκος (km)", f"{w} Απώλεια (dB)", f"{w} dB/km", f"{w}"]
+            heads += [f"{w} Μήκος ({units.name})", f"{w} Απώλεια (dB)", f"{w} dB/km", f"{w}"]
         heads += ["Αρχεία"]
         self.table.setColumnCount(len(heads))
         self.table.setHorizontalHeaderLabels(heads)
@@ -559,7 +587,7 @@ class MainWindow(QMainWindow):
                         self.table.setItem(r, col + k, x)
                 else:
                     ok = evaluate(m.sor, th)
-                    vals = [f"{m.sor.length_km:.3f}",
+                    vals = [units.fmt(m.sor.length_km),
                             f"{m.sor.total_loss:.2f}" if m.sor.total_loss is not None else "",
                             f"{m.sor.attenuation:.3f}" if m.sor.attenuation is not None else "",
                             "–" if ok is None else ("PASS" if ok else "FAIL")]
@@ -589,60 +617,71 @@ class MainWindow(QMainWindow):
 
     def _show_fiber(self, fiber: Fiber | None):
         self.plot.clear()
+        self.plot.setTitle(None)
         self.events_tabs.clear()
         if not fiber:
             return
         th = self.settings.thresholds
-        max_len = 0.0
+        t = TEXT[self.settings.language] if self.settings.language in TEXT else TEXT["el"]
+        sors = []
         for w in fiber.wavelengths:
             m = fiber.measurements[w]
             try:
-                s = parse_sor(m.path)
+                sors.append(prepare(parse_sor(m.path), self.settings))
             except Exception as e:  # noqa: BLE001
                 self.statusBar().showMessage(f"{m.path.name}: {e}", 8000)
-                continue
-            y = s.trace.copy()
-            y[y <= -65.0] = float("nan")
-            pen = pg.mkPen(WL_QCOLORS.get(w, "#000"), width=1.2)
-            self.plot.plot(s.distance_axis, y, pen=pen, name=f"{w} nm", connect="finite")
-            max_len = max(max_len, s.length_km)
-            for i, e in enumerate(s.events, 1):
-                line = pg.InfiniteLine(e.distance_km, angle=90,
-                                       pen=pg.mkPen("#8c959f", width=0.8, style=Qt.DashLine))
-                if w == fiber.wavelengths[0]:
-                    line.label = pg.InfLineLabel(line, str(i), position=0.95, color="#24292f")
+        if not sors:
+            return
+        units = Units(max(s.length_km for s in sors))
+        scale = 1000 if units.m else 1
+        self.plot.setLabel("bottom", f"Απόσταση ({units.name})")
+        launch = max(s.launch_km for s in sors)
+        if launch:
+            region = pg.LinearRegionItem((-launch * scale, 0), movable=False,
+                                         brush=pg.mkBrush(255, 235, 233, 120), pen=pg.mkPen(None))
+            self.plot.addItem(region)
+        for k, s in enumerate(sors):
+            pen = pg.mkPen(WL_QCOLORS.get(s.wavelength, "#000"), width=1.2)
+            self.plot.plot(s.distance_axis * scale, s.trace, pen=pen, name=f"{s.wavelength} nm")
+            if k == 0:
+                for i, e in enumerate(s.events):
+                    line = pg.InfiniteLine(e.rel_km * scale, angle=90,
+                                           pen=pg.mkPen("#8c959f", width=0.8, style=Qt.DashLine))
+                    pg.InfLineLabel(line, str(i), position=0.95, color="#24292f")
                     self.plot.addItem(line)
-
-            t = QTableWidget(len(s.events), 8)
-            t.setHorizontalHeaderLabels(["Τύπος", "Απόσταση (km)", "Τμήμα (km)", "Απώλεια (dB)",
-                                         "Ανάκλαση (dB)", "dB/km", "Αθρ. (dB)", "Αποτ."])
-            t.setEditTriggers(QAbstractItemView.NoEditTriggers)
-            for r, e in enumerate(s.events):
-                ok = event_ok(e, th)
-                vals = [e.type_name, f"{e.distance_km:.4f}", f"{e.section_km:.4f}",
-                        f"{e.splice_loss:.3f}" if r else "–",
-                        f"{e.reflectance:.2f}" if e.reflectance else "–",
-                        f"{e.slope:.3f}" if r and e.slope else "–", f"{e.cumulative_loss:.3f}",
-                        "" if ok is None else ("PASS" if ok else "FAIL")]
-                for k, v in enumerate(vals):
+            tbl = QTableWidget(0, 8)
+            tbl.setHorizontalHeaderLabels(event_headers(t, units))
+            tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            tbl.verticalHeader().setVisible(False)
+            for r, (cells, ok, is_seg) in enumerate(event_rows(s, th, t, units)):
+                tbl.insertRow(r)
+                for c, v in enumerate(cells):
                     x = QTableWidgetItem(v)
                     x.setTextAlignment(Qt.AlignCenter)
-                    if k == 7 and ok is not None:
+                    if is_seg:
+                        x.setForeground(QBrush(QColor("#6e7781")))
+                    if c == 7 and ok is not None:
                         x.setBackground(QBrush(PASS_BG if ok else FAIL_BG))
-                    t.setItem(r, k, x)
-            t.resizeColumnsToContents()
+                    tbl.setItem(r, c, x)
+            tbl.resizeColumnsToContents()
             att = f"{s.attenuation:.3f}" if s.attenuation is not None else "–"
-            info = QLabel(f"{m.path.name}   ·   Μήκος {s.length_km:.3f} km   ·   "
-                          f"Απώλεια {s.total_loss or 0:.2f} dB   ·   {att} dB/km   ·   Παλμός {s.pulse_width_ns} ns")
+            launch_txt = f"Launch {s.launch_km * 1000:.1f} m   ·   " if s.launch_km else ""
+            info = QLabel(f"{s.path.name}   ·   {launch_txt}Μήκος {units.fmt(s.length_km)} {units.name}   ·   "
+                          f"Απώλεια {s.total_loss or 0:.3f} dB   ·   {att} dB/km   ·   Παλμός {s.pulse_width_ns} ns")
             info.setStyleSheet("padding:4px")
             box = QWidget()
             bl = QVBoxLayout(box)
             bl.setContentsMargins(0, 0, 0, 0)
             bl.addWidget(info)
-            bl.addWidget(t)
-            self.events_tabs.addTab(box, f"{w} nm")
+            bl.addWidget(tbl)
+            self.events_tabs.addTab(box, f"{s.wavelength} nm")
+        max_len = max(s.length_km for s in sors)
         if max_len:
-            self.plot.setXRange(0, max_len * 1.08)
+            self.plot.setXRange(-launch * 1.04 * scale, max_len * 1.08 * scale)
+        title = f"{fiber.display}"
+        if sors[0].launch_km:
+            title += f'   <span style="color:#cf222e">Launch cable: {sors[0].launch_km * 1000:.1f} m</span>'
+        self.plot.setTitle(title, size="9pt")
 
     # ---------- ρυθμίσεις & εξαγωγή
     def _save_settings(self):
@@ -709,7 +748,7 @@ def selftest(out_dir: Path) -> int:
     log = out_dir / "selftest.log"
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            make_cable(Path(tmp), "SELFTEST.R01_SCP01", 12, skip={(5, 1550)})
+            make_cable(Path(tmp), "SELFTEST.R01_SCP01", 12, skip={(5, 1550)}, launch_m=100.0)
             project = Project()
             project.load(find_sor_files(tmp))
             cable = project.cables["SELFTEST.R01_SCP01"]

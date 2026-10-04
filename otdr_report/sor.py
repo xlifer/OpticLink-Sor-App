@@ -62,14 +62,19 @@ class _Reader:
 @dataclass
 class Event:
     number: int
-    distance_km: float
-    slope: float          # dB/km
+    distance_km: float    # απόσταση από το OTDR
+    slope: float          # dB/km του τμήματος ίνας πριν από το συμβάν
     splice_loss: float    # dB
     reflectance: float    # dB
     code: str
     comment: str = ""
-    cumulative_loss: float = 0.0
-    section_km: float = 0.0
+    # Υπολογίζονται από το SorFile.apply_launch()
+    rel_km: float = 0.0               # απόσταση από την αρχή της ίνας (μετά το launch cable)
+    section_km: float = 0.0           # μήκος τμήματος πριν από το συμβάν
+    segment_loss: float = 0.0         # απώλεια τμήματος πριν από το συμβάν
+    segment_cum: float | None = None  # αθροιστική απώλεια στο τέλος του τμήματος
+    cumulative_loss: float | None = None  # αθροιστική απώλεια μετά το συμβάν (None μέσα στο launch)
+    role: str = "event"               # origin | launch | start | event | end
 
     @property
     def reflective(self) -> bool:
@@ -81,9 +86,11 @@ class Event:
 
     @property
     def type_name(self) -> str:
-        if self.code[1:2] == "S" or (self.number <= 1 and self.distance_km < 1e-6):
+        if self.role == "launch":
+            return "Launch"
+        if self.role in ("origin", "start"):
             return "Αρχή"
-        if self.is_end:
+        if self.role == "end":
             return "Τέλος"
         return "Ανακλαστικό" if self.reflective else "Μη ανακλ."
 
@@ -99,11 +106,13 @@ class SorFile:
     averages: int
     date: datetime | None
     resolution_km: float
-    trace: np.ndarray            # dB, ήδη αρνητικό πρόσημο (όσο πιο χαμηλά τόσο περισσότερη απώλεια)
+    trace: np.ndarray            # dB, όπως στο όργανο: 0 = θόρυβος, μεγαλύτερο = περισσότερο σήμα
     events: list[Event] = field(default_factory=list)
-    total_loss: float | None = None
-    length_km: float = 0.0
+    file_total_loss: float | None = None
+    end_km: float = 0.0          # θέση τέλους ίνας από το OTDR
     orl: float | None = None
+    user_offset_km: float = 0.0  # launch cable όπως το έγραψε το όργανο (GenParams user offset)
+    launch_km: float = 0.0       # launch cable που εφαρμόζεται τώρα
     cable_id: str = ""
     fiber_id: str = ""
     location_a: str = ""
@@ -115,26 +124,89 @@ class SorFile:
     otdr_sn: str = ""
     software: str = ""
 
+    def __post_init__(self):
+        self.apply_launch(0.0)
+
+    def apply_launch(self, km: float) -> None:
+        """Ορίζει το launch cable και ξαναϋπολογίζει αποστάσεις και αθροιστικές απώλειες.
+
+        Όπως στο όργανο: το συμβάν στο τέλος του launch cable γίνεται η αρχή (S) στο 0,
+        οι αποστάσεις μετρούν από εκεί και η απώλεια του connector (S) μετράει στο σύνολο.
+        """
+        ev = self.events
+        launch = 0.0
+        start = 0
+        if km and km > 0 and len(ev) > 1:
+            tol = max(0.005, 5 * self.resolution_km)
+            idx = min(range(1, len(ev)), key=lambda i: abs(ev[i].distance_km - km))
+            if abs(ev[idx].distance_km - km) <= tol and not ev[idx].is_end:
+                launch, start = ev[idx].distance_km, idx
+            else:
+                launch, start = km, -1
+        self.launch_km = launch
+        cum = 0.0
+        prev = 0.0
+        eps = 1e-9
+        for i, e in enumerate(ev):
+            e.section_km = e.distance_km - prev if i else 0.0
+            e.segment_loss = e.slope * e.section_km if i else 0.0
+            overlap = max(0.0, e.distance_km - max(prev, launch)) if i else 0.0
+            cum += e.slope * overlap
+            e.segment_cum = cum if i and e.distance_km > launch + eps else None
+            e.rel_km = e.distance_km - launch
+            if e.is_end and i:
+                e.role = "end"
+            elif i == start:
+                e.role = "start" if launch else "origin"
+            elif e.distance_km < launch - eps:
+                e.role = "launch"
+            else:
+                e.role = "event"
+            if e.distance_km >= launch - eps:
+                if e.role != "end":
+                    cum += e.splice_loss
+                e.cumulative_loss = cum
+            else:
+                e.cumulative_loss = None
+            prev = e.distance_km
+        self._computed_total = cum
+
+    @property
+    def length_km(self) -> float:
+        return max(0.0, self.end_km - self.launch_km)
+
+    @property
+    def total_loss(self) -> float | None:
+        if not self.events:
+            return self.file_total_loss
+        if self.launch_km or not self.file_total_loss:
+            return self._computed_total
+        return self.file_total_loss
+
     @property
     def distance_axis(self) -> np.ndarray:
-        return np.arange(len(self.trace), dtype=np.float64) * self.resolution_km
+        return np.arange(len(self.trace), dtype=np.float64) * self.resolution_km - self.launch_km
 
     @property
     def attenuation(self) -> float | None:
-        """Μέση εξασθένηση ίνας (dB/km), σταθμισμένη με το μήκος κάθε τμήματος.
+        """Μέση εξασθένηση ίνας (dB/km) μετά το launch cable, σταθμισμένη με το μήκος.
 
         Δεν περιλαμβάνει απώλειες connectors/κολλήσεων, όπως και στο OTDR.
         """
         num = den = 0.0
-        for e in self.events[1:]:
-            if e.slope > 0 and e.section_km > 0:
-                num += e.slope * e.section_km
-                den += e.section_km
+        prev = 0.0
+        for e in self.events:
+            overlap = max(0.0, e.distance_km - max(prev, self.launch_km))
+            if e.slope > 0 and overlap > 0:
+                num += e.slope * overlap
+                den += overlap
+            prev = e.distance_km
         if den:
             return num / den
-        if self.total_loss is None or not self.length_km:
+        total = self.total_loss
+        if total is None or not self.length_km:
             return None
-        return self.total_loss / self.length_km
+        return total / self.length_km
 
 
 def _read_map(r: _Reader):
@@ -173,6 +245,7 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
         return br
 
     gen = {}
+    user_offset = 0
     if "GenParams" in blocks:
         g = block("GenParams")
         g.fixed(2)
@@ -185,7 +258,7 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
         gen["location_b"] = g.str()
         g.str()
         g.fixed(2)
-        g.i32()
+        user_offset = g.i32()            # χρόνος σε 0,1 ns (το FHO5000 γράφει εδώ το launch cable)
         if v2:
             g.i32()
         gen["operator"] = g.str()
@@ -251,19 +324,6 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
         ends = [e for e in events if e.is_end]
         length = ends[0].distance_km if ends else (events[-1].distance_km if events else 0.0)
 
-    # Αθροιστική απώλεια και μήκος τμήματος για τον πίνακα συμβάντων (όπως στην παλιά λίστα)
-    # Το slope ενός συμβάντος αφορά το τμήμα ίνας που προηγείται.
-    cum = 0.0
-    prev = 0.0
-    for i, e in enumerate(events):
-        e.section_km = e.distance_km - prev
-        if i > 0:
-            cum += events[i - 1].splice_loss + e.slope * e.section_km
-        e.cumulative_loss = cum
-        prev = e.distance_km
-    if not total_loss and events:
-        total_loss = events[-1].cumulative_loss
-
     trace = np.zeros(0, dtype=np.float32)
     if with_trace and "DataPts" in blocks:
         d = block("DataPts")
@@ -275,7 +335,8 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
         if end > len(data):
             npts = (len(data) - d.p) // 2
         raw = np.frombuffer(data, dtype="<u2", count=npts, offset=d.p)
-        trace = (-raw.astype(np.float32) * scale / 1000).astype(np.float32)
+        # Όπως το δείχνει το όργανο: 0 dB = κάτω όριο, όσο πιο ψηλά τόσο περισσότερο σήμα
+        trace = ((65535 - raw.astype(np.float32)) * scale / 1000).astype(np.float32)
 
     date = None
     if ts:
@@ -296,9 +357,10 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
         resolution_km=resolution,
         trace=trace,
         events=events,
-        total_loss=total_loss,
-        length_km=length,
+        file_total_loss=total_loss,
+        end_km=length,
         orl=orl,
+        user_offset_km=max(0, user_offset) * km_per_tof,
         **gen_filter(gen),
         **sup,
     )
@@ -316,14 +378,15 @@ def parse_sor(path: str | Path, with_trace: bool = True) -> SorFile:
 def downsample(sor: SorFile, buckets: int = 1000, max_km: float | None = None):
     """Μειώνει την καμπύλη σε ζεύγη min/max ώστε να φαίνονται οι κορυφές.
 
-    Επιστρέφει (x_km, y_dB) ως numpy arrays.
+    Επιστρέφει (x_km, y_dB) ως numpy arrays, με x από την αρχή της ίνας
+    (αρνητικό μέσα στο launch cable). Το max_km μετράει επίσης από την αρχή της ίνας.
     """
     y = sor.trace
     n = len(y)
     if max_km is not None and sor.resolution_km > 0:
-        n = min(n, int(np.ceil(max_km / sor.resolution_km)) + 1)
+        n = min(n, int(np.ceil((max_km + sor.launch_km) / sor.resolution_km)) + 1)
     y = y[:n]
-    x = np.arange(n) * sor.resolution_km
+    x = np.arange(n) * sor.resolution_km - sor.launch_km
     if n <= buckets * 2:
         return x, y
     edges = np.linspace(0, n, buckets + 1).astype(int)

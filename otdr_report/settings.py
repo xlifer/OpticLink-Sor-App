@@ -39,6 +39,9 @@ class ReportSettings:
     chart_mode: str = "overlay"          # "overlay" (μαζί) ή "separate" (ξεχωριστά)
     summary_page: bool = True
     one_pdf_per_cable: bool = True
+    signatures: bool = True              # γραμμές "Συντάχθηκε / Ελέγχθηκε / Εγκρίθηκε"
+    launch_mode: str = "file"            # "file" (από το όργανο), "manual" ή "none"
+    launch_m: float = 0.0                # για launch_mode == "manual"
     thresholds: Thresholds = field(default_factory=Thresholds)
 
     def to_json(self) -> str:
@@ -53,9 +56,27 @@ class ReportSettings:
         return cls(thresholds=th, **known)
 
 
+def launch_km_for(sor: SorFile, rs: ReportSettings) -> float:
+    if rs.launch_mode == "manual":
+        return max(0.0, rs.launch_m) / 1000
+    if rs.launch_mode == "none":
+        return 0.0
+    return sor.user_offset_km
+
+
+def prepare(sor: SorFile, rs: ReportSettings) -> SorFile:
+    """Εφαρμόζει το launch cable των ρυθμίσεων στη μέτρηση."""
+    sor.apply_launch(launch_km_for(sor, rs))
+    return sor
+
+
 def event_ok(e: Event, th: Thresholds) -> bool | None:
-    """True/False για το συμβάν, None αν δεν ελέγχεται (αρχή/τέλος ή κανένα ενεργό κριτήριο)."""
-    if not th.enabled or e.type_name in ("Αρχή", "Τέλος"):
+    """True/False για το συμβάν, None αν δεν ελέγχεται.
+
+    Δεν ελέγχονται: η αρχή του OTDR, ό,τι είναι μέσα στο launch cable και το τέλος.
+    Ο connector στο τέλος του launch cable (S) ελέγχεται κανονικά.
+    """
+    if not th.enabled or e.role in ("origin", "launch", "end"):
         return None
     checked = False
     if e.reflective:
