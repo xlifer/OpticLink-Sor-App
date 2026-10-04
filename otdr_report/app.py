@@ -440,9 +440,8 @@ class ExportDialog(QDialog):
             if it.checkState(0) != Qt.Checked:
                 continue
             c = self.project.cables[it.data(0, Qt.UserRole)]
-            wls = set(c.wavelengths)
             fibers = [f for f in c.sorted_fibers() if lo <= f.number <= hi
-                      and (not self.only_complete.isChecked() or wls <= set(f.measurements))]
+                      and (not self.only_complete.isChecked() or c.required <= set(f.measurements))]
             if fibers:
                 out.append((c, fibers))
         return out
@@ -718,7 +717,7 @@ class MainWindow(QMainWindow):
         select = None
         for c in self.project.sorted_cables():
             wls = c.wavelengths
-            fails = sum(1 for f in c.fibers.values() if fiber_verdict(f, wls, th) is False)
+            fails = sum(1 for f in c.fibers.values() if fiber_verdict(f, c.required, th) is False)
             missing = len(c.incomplete())
             it = QTreeWidgetItem([c.name, str(len(c.fibers)), str(missing), str(fails)])
             it.setData(0, Qt.UserRole, c.name)
@@ -779,7 +778,7 @@ class MainWindow(QMainWindow):
         counts = {"all": len(fibers), "fail": 0, "missing": 0, "pass": 0}
         inf = float("inf")
         for r, f in enumerate(fibers):
-            verdict = fiber_verdict(f, wls, th)
+            verdict = fiber_verdict(f, cable.required, th)
             counts["fail"] += verdict is False
             counts["missing"] += verdict == "missing"
             counts["pass"] += verdict is True
@@ -972,7 +971,11 @@ class MainWindow(QMainWindow):
     def _show_fiber(self, fiber: Fiber | None):
         self.plot.clear()
         self.plot.setTitle(None)
-        self.events_tabs.clear()
+        while self.events_tabs.count():          # το clear() δεν διαγράφει τις σελίδες: διαρροή μνήμης
+            page = self.events_tabs.widget(0)
+            self.events_tabs.removeTab(0)
+            page.setParent(None)                 # άμεση διαγραφή μόλις χαθεί η αναφορά (όχι deleteLater)
+            del page
         if not fiber:
             return
         th = self.settings.thresholds

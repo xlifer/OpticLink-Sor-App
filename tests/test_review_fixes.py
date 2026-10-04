@@ -215,3 +215,33 @@ def test_cancel_during_rendering(tmp_path):
                            ReportSettings(), lambda d, t, label: label != "Γράφεται το PDF…")
     assert out.cancelled and out == []
     assert not list((tmp_path / "out").glob("*.pdf"))                       # ούτε μισό .part.pdf
+
+
+# ---------- Έλεγχος Codex #7: ένα επιπλέον 1625 δεν αποκλείει πλήρη ζεύγη 1310+1550 ----------
+def test_extra_1625_does_not_exclude_complete_pairs(tmp_path):
+    make_cable(tmp_path, "E_SCP1", 3)
+    make_cable(tmp_path / "x", "E_SCP1", 1, wavelengths=(1625,), seed=9)      # μόνο η 0001 έχει και 1625
+    p = Project()
+    p.load(find_sor_files(tmp_path))
+    c = p.cables["E_SCP1"]
+    assert c.wavelengths == [1310, 1550, 1625] and c.incomplete() == []
+    out = generate_reports([(c, c.sorted_fibers())], tmp_path / "out", ReportSettings())
+    assert len(out) == 1 and out.excluded == []
+
+
+# ---------- Έλεγχος Codex #8: μεγάλα ονόματα στη σύνοψη αναδιπλώνονται ----------
+def test_long_names_wrap_in_summary(tmp_path):
+    from reportlab.platypus import Paragraph
+    from otdr_report.pdf_report import ReportBuilder
+    long = "FARM1.R01_SCP31_DISTRIBUTION_POINT_NORTH_SIDE_BUILDING_B"
+    make_cable(tmp_path, long, 2)
+    p = Project()
+    p.load(find_sor_files(tmp_path))
+    c = p.sorted_cables()[0]
+    read = {f.key: {w: prepare(parse_sor_bytes(m.path.read_bytes()), ReportSettings())
+                    for w, m in f.measurements.items()} for f in c.sorted_fibers()}
+    story = ReportBuilder(ReportSettings()).summary_story(c, c.sorted_fibers(), read)
+    table = max((x for x in story if x.__class__.__name__ == "Table"), key=lambda t: len(t._cellvalues))
+    assert len(table._cellvalues) == 3                                       # επικεφαλίδα + 2 μετρήσεις
+    assert isinstance(table._cellvalues[1][0], Paragraph)                    # όχι απλό κείμενο που ξεχειλίζει
+    assert generate_reports([(c, c.sorted_fibers())], tmp_path / "out", ReportSettings())

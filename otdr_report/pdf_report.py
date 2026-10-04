@@ -341,8 +341,10 @@ def _tick_label(v):
     return f"{v:g}"
 
 
-def fiber_verdict(fiber: Fiber, wls: list[int], th, sors: dict[int, SorFile] | None = None) -> bool | str | None:
-    """True=PASS, False=FAIL, "missing"=λείπει μήκος κύματος, None=χωρίς κριτήρια.
+def fiber_verdict(fiber: Fiber, required, th, sors: dict[int, SorFile] | None = None) -> bool | str | None:
+    """True=PASS, False=FAIL, "missing"=λείπει υποχρεωτικό μήκος κύματος, None=χωρίς κριτήρια.
+
+    `required`: τα υποχρεωτικά μήκη κύματος (Cable.required, δηλ. 1310 και 1550).
 
     Με `sors` κρίνονται οι μετρήσεις όπως διαβάστηκαν τώρα από τον δίσκο (για το PDF)·
     χωρίς αυτό, όπως φορτώθηκαν (για την οθόνη).
@@ -352,7 +354,7 @@ def fiber_verdict(fiber: Fiber, wls: list[int], th, sors: dict[int, SorFile] | N
     results = [evaluate(s, th) for s in sors.values()]
     if any(r is False for r in results):
         return False
-    if not set(wls) <= set(sors):
+    if not set(required) <= set(sors):
         return "missing"
     if results and all(r is None for r in results):
         return None
@@ -503,9 +505,10 @@ class ReportBuilder:
         head.append(t["result"])
         rows = [head]
         result_cols = [4 * i + 4 for i in range(len(wls))] + [len(head) - 1]
+        name_style = ParagraphStyle("nm", fontName="DejaVu", fontSize=6.5, leading=7.5)   # αναδίπλωση
         n_pass = n_fail = 0
         for f in fibers:
-            row = [f.display]
+            row = [Paragraph(_esc(f.display), name_style)]
             sors = read[f.key]
             for w in wls:
                 sor = sors.get(w)
@@ -514,13 +517,13 @@ class ReportBuilder:
                     continue
                 row += [units.fmt(sor.length_km), _fmt(sor.total_loss, 2),
                         _fmt(sor.attenuation, 3), self._verdict(evaluate(sor, th))]
-            v = fiber_verdict(f, wls, th, sors)
+            v = fiber_verdict(f, cable.required, th, sors)
             row.append(self._verdict(v))
             n_pass += v is True
             n_fail += v is False
             rows.append(row)
         avail = A4[0] - 24 * mm
-        first = min(60 * mm, max(16 * mm, max(len(f.display) for f in fibers) * 1.35 * mm + 4 * mm))
+        first = min(45 * mm, max(16 * mm, max(len(f.display) for f in fibers) * 1.35 * mm + 4 * mm))
         rest = (avail - first - 21 * mm) / max(1, 4 * len(wls))
         widths = [first] + [rest] * (4 * len(wls)) + [21 * mm]
         story.append(self._table(rows, widths, result_col=result_cols, font_size=6.5))
@@ -530,7 +533,7 @@ class ReportBuilder:
             story.append(Paragraph(
                 f"{t['pass']}: <b>{n_pass}</b> &nbsp; · &nbsp; {t['fail']}: <b>{n_fail}</b>", self.st["n"]))
             story.append(Paragraph(f"{t['criteria']}: {_esc(crit)}", self.st["small"]))
-        miss = [f.display for f in fibers if not set(wls) <= set(read[f.key])]
+        miss = [f.display for f in fibers if not cable.required <= set(read[f.key])]
         if miss:
             story.append(Paragraph(f"{t['incomplete']}: " + ", ".join(miss), self.st["small"]))
         story.append(PageBreak())
@@ -544,7 +547,7 @@ class ReportBuilder:
         present = [sors[w] for w in wls if w in sors]
         units = Units(max((s.length_km for s in present), default=0))
         subtitle = f"{t['cable']}: {_esc(cable.name)} &nbsp; · &nbsp; {t['fiber']}: <b>{_esc(fiber.display)}</b>"
-        story = [self._header(t["title"], subtitle, fiber_verdict(fiber, wls, th, sors)), Spacer(1, 3 * mm)]
+        story = [self._header(t["title"], subtitle, fiber_verdict(fiber, cable.required, th, sors)), Spacer(1, 3 * mm)]
 
         head = [t["wl"], t["file"], t["date"], t["pulse"], t["ior"], f"{t['launch']} (m)",
                 f"{t['length']} ({units.name})", t["loss"], t["att"], t["result"]]
@@ -760,7 +763,6 @@ def generate_reports(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path, sett
         return progress(step, total, "Γράφεται το PDF…") is not False if progress else True
 
     def read_cable(cable: Cable, fibers: list[Fiber]):
-        wls = set(cable.wavelengths)
         keep, read = [], {}
         for f in fibers:
             sors = {}
@@ -769,7 +771,7 @@ def generate_reports(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path, sett
                     sors[w] = prepare(parse_sor(m.path), settings)
                 except (SorError, OSError, ValueError) as e:
                     result.unreadable.append((m.path, str(e)))
-            missing = sorted(wls - set(sors))
+            missing = sorted(set(cable.required) - set(sors))
             if missing and not settings.allow_incomplete:
                 result.excluded.append((cable.name, f.display, missing))
                 tick("")                                  # δεν θα χτιστεί σελίδα

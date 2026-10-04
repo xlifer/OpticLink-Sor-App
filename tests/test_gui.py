@@ -197,3 +197,14 @@ def test_close_while_job_runs_waits_for_it(win, qapp):
     for _ in range(20):
         qapp.processEvents()
     assert got == []                                   # on_done δεν καλείται σε παράθυρο που κλείνει
+
+
+def test_switching_fibers_does_not_accumulate_tables(win, qapp):
+    """Codex #5: οι πίνακες συμβάντων των προηγούμενων μετρήσεων διαγράφονται."""
+    from PySide6.QtWidgets import QTableWidget
+    for r in range(15):
+        win.table.setCurrentCell(r, 0)
+        qapp.processEvents()
+    for _ in range(5):
+        qapp.processEvents()
+    assert len(win.events_tabs.findChildren(QTableWidget)) == 2              # μόνο 1310 + 1550 της τρέχουσας

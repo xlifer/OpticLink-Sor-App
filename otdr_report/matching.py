@@ -121,8 +121,8 @@ class Cable:
         return sorted(s)
 
     def incomplete(self) -> list[Fiber]:
-        wls = set(self.wavelengths)
-        return [f for f in self.sorted_fibers() if set(f.measurements) != wls]
+        """Μετρήσεις χωρίς όλα τα υποχρεωτικά μήκη κύματος (1310, 1550). Τα επιπλέον (π.χ. 1625) δεν μετράνε."""
+        return [f for f in self.sorted_fibers() if not self.required <= set(f.measurements)]
 
 
 def _parts(prefix: str) -> list[str]:
