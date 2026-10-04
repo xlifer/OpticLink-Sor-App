@@ -1,8 +1,8 @@
 ; Inno Setup – δημιουργεί το OTDRBatchReport-Setup-<έκδοση>.exe
-; Build: iscc /DAppVersion=1.0.0 installer\setup.iss  (μετά το pyinstaller)
+; Build: iscc /DAppVersion=1.1.0 installer\setup.iss  (μετά το pyinstaller)
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.1.0"
 #endif
 
 [Setup]

@@ -113,7 +113,7 @@ Build σε Windows:
 
 ```bat
 pyinstaller --noconfirm OTDRBatchReport.spec
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=1.0.0 installer\setup.iss
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=1.1.0 installer\setup.iss
 ```
 
 Το workflow `.github/workflows/build-windows.yml` τα κάνει αυτόματα σε κάθε push:
