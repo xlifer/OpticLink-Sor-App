@@ -8,23 +8,86 @@ from pathlib import Path
 
 import pyqtgraph as pg
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
+                               QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog,
-                               QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
-                               QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressDialog,
+                               QPushButton, QSpinBox, QSplitter, QStyle, QStyledItemDelegate,
+                               QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from . import __version__
-from .matching import Cable, Fiber, Project, find_sor_files
-from .pdf_report import TEXT, Units, event_headers, event_rows, generate_reports
+from .matching import Cable, Fiber, Project, _natural_key, find_sor_files
+from .pdf_report import TEXT, Units, event_headers, event_rows, fiber_verdict, generate_reports
 from .settings import ReportSettings, evaluate, prepare
 from .sor import parse_sor
 
 APP_NAME = "OTDR Batch Report"
 WL_QCOLORS = {1310: "#1f6feb", 1550: "#d1242f", 1625: "#8250df", 1490: "#1a7f37", 850: "#bf8700"}
-PASS_BG, FAIL_BG, MISS_BG = QColor("#dafbe1"), QColor("#ffebe9"), QColor("#fff8c5")
+# Ίδια χρώματα με το PDF, ως συμπαγές φόντο με άσπρα έντονα γράμματα: διαβάζονται
+# το ίδιο καθαρά σε ανοιχτό και σε σκοτεινό θέμα των Windows.
+PASS_C, FAIL_C, MISS_C = QColor("#1a7f37"), QColor("#cf222e"), QColor("#9a6700")
+VERDICT_TEXT = {True: "PASS", False: "FAIL", "missing": "ΕΛΛΙΠΗΣ", None: "–"}
+VERDICT_SORT = {False: 0, "missing": 1, True: 2, None: 3}   # ταξινόμηση: πρώτα τα FAIL
+
+
+def paint_verdict(item: QTableWidgetItem, verdict) -> None:
+    """Χρωματίζει κελί: PASS πράσινο, FAIL κόκκινο, ελλιπής πορτοκαλί (άσπρα έντονα γράμματα)."""
+    if verdict is True:
+        color = PASS_C
+    elif verdict is False:
+        color = FAIL_C
+    elif verdict == "missing":
+        color = MISS_C
+    else:
+        return
+    font = QFont(item.font())
+    font.setBold(True)
+    item.setBackground(QBrush(color))
+    item.setForeground(QBrush(QColor("white")))
+    item.setFont(font)
+
+
+def paint_tree_cell(item: QTreeWidgetItem, col: int, color: QColor) -> None:
+    font = QFont(item.font(col))
+    font.setBold(True)
+    item.setBackground(col, QBrush(color))
+    item.setForeground(col, QBrush(QColor("white")))
+    item.setFont(col, font)
+    item.setTextAlignment(col, Qt.AlignCenter)
+
+
+class KeepColorDelegate(QStyledItemDelegate):
+    """Τα χρωματισμένα κελιά (PASS/FAIL) κρατούν το χρώμα τους και όταν η γραμμή είναι επιλεγμένη."""
+
+    def paint(self, painter, option, index):
+        if index.data(Qt.BackgroundRole) is not None and option.state & QStyle.State_Selected:
+            option.state &= ~QStyle.State_Selected
+        super().paint(painter, option, index)
+
+
+class SortItem(QTableWidgetItem):
+    """Κελί που ταξινομείται με αριθμητικό/φυσικό κλειδί αντί για το κείμενο."""
+
+    def __init__(self, text: str, key=None):
+        super().__init__(text)
+        self._key = key if key is not None else text
+
+    def __lt__(self, other):
+        other_key = getattr(other, "_key", other.text())
+        try:
+            return self._key < other_key
+        except TypeError:
+            return str(self._key) < str(other_key)
+
+
+def reveal_file(path: Path):
+    """Ανοίγει τον φάκελο του αρχείου με το αρχείο επιλεγμένο (Windows) ή απλώς τον φάκελο."""
+    if sys.platform.startswith("win"):
+        subprocess.Popen(["explorer", "/select,", str(path)])
+    else:
+        open_folder(path.parent)
 
 
 def resource(name: str) -> Path:
@@ -348,6 +411,10 @@ class MainWindow(QMainWindow):
         self.project = Project(group_level=self._saved_level())
         self.current_cable: Cable | None = None
         self._row_fibers: list[Fiber] = []
+        self._removed: list[Path] = []          # για "Επαναφορά αφαιρεμένων"
+        self._filter = "all"                    # all | fail | missing | pass
+        self._want_fiber: str | None = None     # μέτρηση που ξαναεπιλέγεται μετά από ανανέωση
+        self._sort = (0, Qt.AscendingOrder)
 
         tb = self.addToolBar("main")
         tb.setMovable(False)
@@ -387,15 +454,60 @@ class MainWindow(QMainWindow):
         for col in (1, 2, 3):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.tree.currentItemChanged.connect(self._cable_selected)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
 
         # Κέντρο: ίνες
         self.table = QTableWidget()
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.itemSelectionChanged.connect(self._fiber_selected)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_menu)
+        self._keep_color = KeepColorDelegate(self.table)
+        self.table.setItemDelegate(self._keep_color)
+        self.table.horizontalHeader().sortIndicatorChanged.connect(
+            lambda col, order: setattr(self, "_sort", (col, order)))
+        self._del_shortcut = QShortcut(QKeySequence(QKeySequence.Delete), self.table)
+        self._del_shortcut.activated.connect(self._remove_selected)
+
+        # Γρήγορο φίλτρο πάνω από τον πίνακα
+        filter_bar = QWidget()
+        fl = QHBoxLayout(filter_bar)
+        fl.setContentsMargins(4, 2, 4, 2)
+        fl.addWidget(QLabel("Εμφάνιση:"))
+        self.filter_group = QButtonGroup(self)
+        self.filter_group.setExclusive(True)
+        self.filter_buttons: dict[str, QPushButton] = {}
+        styles = {"fail": FAIL_C, "missing": MISS_C, "pass": PASS_C}
+        for key in ("all", "fail", "missing", "pass"):
+            b = QPushButton()
+            b.setCheckable(True)
+            b.setMinimumWidth(110)
+            # Πάντα γεμάτα με το χρώμα τους (καθαρά και σε σκοτεινό θέμα). Το επιλεγμένο έχει χοντρό περίγραμμα.
+            c = styles[key].name() if key in styles else "#57606a"
+            b.setStyleSheet(
+                f"QPushButton {{ background: {c}; color: white; font-weight: bold; border: 2px solid {c};"
+                f" border-radius: 4px; padding: 3px 10px; }}"
+                f"QPushButton:checked {{ border: 3px solid palette(text); }}")
+            self.filter_group.addButton(b)
+            self.filter_buttons[key] = b
+            b.clicked.connect(lambda _c=False, k=key: self._set_filter(k))
+            fl.addWidget(b)
+        self.filter_buttons["all"].setChecked(True)
+        fl.addStretch()
+        hint_r = QLabel("Δεξί κλικ σε μέτρηση: αφαίρεση / επαναφορά / προσθήκη")
+        hint_r.setStyleSheet("color:#6e7781")
+        fl.addWidget(hint_r)
+        table_box = QWidget()
+        tl = QVBoxLayout(table_box)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(0)
+        tl.addWidget(filter_bar)
+        tl.addWidget(self.table)
 
         # Κάτω: γράφημα + συμβάντα
         pg.setConfigOptions(antialias=True, background="w", foreground="#333")
@@ -415,7 +527,7 @@ class MainWindow(QMainWindow):
         bottom.setSizes([850, 550])
 
         right = QSplitter(Qt.Vertical)
-        right.addWidget(self.table)
+        right.addWidget(table_box)
         right.addWidget(bottom)
         right.setSizes([380, 440])
 
@@ -440,8 +552,8 @@ class MainWindow(QMainWindow):
             self.qs.setValue("lastDir", d)
             self.load_paths([Path(d)])
 
-    def add_files(self):
-        fns, _ = QFileDialog.getOpenFileNames(self, "Αρχεία .sor", self.qs.value("lastDir", "", str),
+    def add_files(self, start_dir: str | None = None):
+        fns, _ = QFileDialog.getOpenFileNames(self, "Αρχεία .sor", start_dir or self.qs.value("lastDir", "", str),
                                               "OTDR (*.sor *.SOR)")
         if fns:
             self.qs.setValue("lastDir", str(Path(fns[0]).parent))
@@ -518,6 +630,7 @@ class MainWindow(QMainWindow):
     def clear(self):
         self.project = Project(group_level=self._saved_level())
         self.current_cable = None
+        self._removed = []
         self._refresh()
 
     # ---------- προβολή
@@ -526,26 +639,43 @@ class MainWindow(QMainWindow):
             for f in c.fibers.values():
                 for m in f.measurements.values():
                     prepare(m.sor, self.settings)
+        keep_cable = self.current_cable.name if self.current_cable else None
+        if self._want_fiber is None:
+            cur = self._current_fiber()
+            self._want_fiber = cur.display if cur else None
         self._fill_group_combo()
+        self.tree.blockSignals(True)
         self.tree.clear()
         th = self.settings.thresholds
+        select = None
         for c in self.project.sorted_cables():
-            fails = sum(1 for f in c.fibers.values()
-                        if any(evaluate(m.sor, th) is False for m in f.measurements.values()))
-            it = QTreeWidgetItem([c.name, str(len(c.fibers)), str(len(c.incomplete())), str(fails)])
+            wls = c.wavelengths
+            fails = sum(1 for f in c.fibers.values() if fiber_verdict(f, wls, th) is False)
+            missing = len(c.incomplete())
+            it = QTreeWidgetItem([c.name, str(len(c.fibers)), str(missing), str(fails)])
             it.setData(0, Qt.UserRole, c.name)
-            if c.incomplete():
-                it.setBackground(2, QBrush(MISS_BG))
+            for col in (1, 2, 3):
+                it.setTextAlignment(col, Qt.AlignCenter)
+            if missing:
+                paint_tree_cell(it, 2, MISS_C)
             if fails:
-                it.setBackground(3, QBrush(FAIL_BG))
+                paint_tree_cell(it, 3, FAIL_C)
             self.tree.addTopLevelItem(it)
-        if self.tree.topLevelItemCount():
-            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+            if c.name == keep_cable:
+                select = it
+        self.tree.blockSignals(False)
+        if select is None and self.tree.topLevelItemCount():
+            select = self.tree.topLevelItem(0)
+        if select is not None:
+            self.tree.setCurrentItem(select)   # → _cable_selected (μία φορά, από το σήμα)
         else:
             self._show_cable(None)
+        self._want_fiber = None
         n = self.project.file_count
-        self.statusBar().showMessage(
-            f"{len(self.project.cables)} καλώδια · {n} αρχεία" if n else "Άνοιξε έναν φάκελο με μετρήσεις .sor")
+        msg = f"{len(self.project.cables)} καλώδια · {n} αρχεία" if n else "Άνοιξε έναν φάκελο με μετρήσεις .sor"
+        if self._removed:
+            msg += f" · {len(self._removed)} αφαιρεμένα (δεξί κλικ → Επαναφορά)"
+        self.statusBar().showMessage(msg)
         self.act_pdf.setEnabled(bool(self.project.cables))
 
     def _cable_selected(self, cur, _prev=None):
@@ -555,16 +685,20 @@ class MainWindow(QMainWindow):
     def _show_cable(self, cable: Cable | None):
         self.current_cable = cable
         self._row_fibers = []
+        self.table.blockSignals(True)
+        self.table.setSortingEnabled(False)
         self.table.clear()
         self.table.setRowCount(0)
         if not cable:
             self.table.setColumnCount(0)
+            self.table.blockSignals(False)
+            self._update_filter_counts({})
             self._show_fiber(None)
             return
         wls = cable.wavelengths
         units = Units(max((m.sor.length_km for f in cable.fibers.values()
                            for m in f.measurements.values()), default=0))
-        heads = ["Μέτρηση"]
+        heads = ["Μέτρηση", "Αποτέλεσμα"]
         for w in wls:
             heads += [f"{w} Μήκος ({units.name})", f"{w} Απώλεια (dB)", f"{w} dB/km", f"{w}"]
         heads += ["Αρχεία"]
@@ -574,28 +708,47 @@ class MainWindow(QMainWindow):
         self._row_fibers = fibers
         self.table.setRowCount(len(fibers))
         th = self.settings.thresholds
+        counts = {"all": len(fibers), "fail": 0, "missing": 0, "pass": 0}
+        inf = float("inf")
         for r, f in enumerate(fibers):
-            it = QTableWidgetItem(f.display)
-            self.table.setItem(r, 0, it)
-            col = 1
+            verdict = fiber_verdict(f, wls, th)
+            counts["fail"] += verdict is False
+            counts["missing"] += verdict == "missing"
+            counts["pass"] += verdict is True
+            name = SortItem(f.display, (f.number, _natural_key(f.sub), _natural_key(f.display)))
+            name.setData(Qt.UserRole, r)
+            name.setData(Qt.UserRole + 1, "fail" if verdict is False else "missing" if verdict == "missing"
+                         else "pass" if verdict is True else "none")
+            self.table.setItem(r, 0, name)
+            res = SortItem(VERDICT_TEXT[verdict], VERDICT_SORT[verdict])
+            res.setTextAlignment(Qt.AlignCenter)
+            paint_verdict(res, verdict)
+            self.table.setItem(r, 1, res)
+            col = 2
             for w in wls:
                 m = f.measurements.get(w)
                 if not m:
                     for k in range(4):
-                        x = QTableWidgetItem("λείπει" if k == 3 else "")
-                        x.setBackground(QBrush(MISS_BG))
+                        x = SortItem("λείπει" if k == 3 else "", VERDICT_SORT["missing"] if k == 3 else inf)
+                        x.setTextAlignment(Qt.AlignCenter)
+                        if k == 3:
+                            paint_verdict(x, "missing")
                         self.table.setItem(r, col + k, x)
                 else:
                     ok = evaluate(m.sor, th)
-                    vals = [units.fmt(m.sor.length_km),
-                            f"{m.sor.total_loss:.2f}" if m.sor.total_loss is not None else "",
-                            f"{m.sor.attenuation:.3f}" if m.sor.attenuation is not None else "",
-                            "–" if ok is None else ("PASS" if ok else "FAIL")]
-                    for k, v in enumerate(vals):
-                        x = QTableWidgetItem(v)
+                    cells = [
+                        (units.fmt(m.sor.length_km), m.sor.length_km),
+                        (f"{m.sor.total_loss:.2f}" if m.sor.total_loss is not None else "",
+                         m.sor.total_loss if m.sor.total_loss is not None else inf),
+                        (f"{m.sor.attenuation:.3f}" if m.sor.attenuation is not None else "",
+                         m.sor.attenuation if m.sor.attenuation is not None else inf),
+                        (VERDICT_TEXT[ok], VERDICT_SORT[ok]),
+                    ]
+                    for k, (v, key) in enumerate(cells):
+                        x = SortItem(v, key)
                         x.setTextAlignment(Qt.AlignCenter)
-                        if k == 3 and ok is not None:
-                            x.setBackground(QBrush(PASS_BG if ok else FAIL_BG))
+                        if k == 3:
+                            paint_verdict(x, ok)
                         self.table.setItem(r, col + k, x)
                 col += 4
             names = ", ".join(m.path.name for m in f.measurements.values())
@@ -604,16 +757,149 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, col, QTableWidgetItem(names))
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
-        if fibers:
-            self.table.selectRow(0)
+        sort_col, sort_order = self._sort
+        if sort_col >= self.table.columnCount():
+            sort_col, sort_order = 0, Qt.AscendingOrder
+        self.table.horizontalHeader().setSortIndicator(sort_col, sort_order)
+        self.table.setSortingEnabled(True)
+        self._update_filter_counts(counts)
+        self._apply_filter()
+        self.table.blockSignals(False)
+        self._select_row_for(self._want_fiber)
+
+    def _select_row_for(self, display: str | None):
+        """Επιλέγει τη γραμμή της μέτρησης `display` (ή την πρώτη ορατή)."""
+        target = None
+        for r in range(self.table.rowCount()):
+            if self.table.isRowHidden(r):
+                continue
+            if target is None:
+                target = r
+            if display is not None and self.table.item(r, 0).text() == display:
+                target = r
+                break
+        self.table.blockSignals(True)
+        if target is None:
+            self.table.clearSelection()
+        else:
+            self.table.setCurrentCell(target, 0)
+            self.table.selectRow(target)
+            self.table.scrollToItem(self.table.item(target, 0))
+        self.table.blockSignals(False)
+        self.table.viewport().update()
+        self._fiber_selected()
+
+    def _update_filter_counts(self, counts: dict):
+        labels = {"all": "Όλες", "fail": "FAIL", "missing": "Ελλιπείς", "pass": "PASS"}
+        for key, b in self.filter_buttons.items():
+            b.setText(f"{labels[key]} ({counts.get(key, 0)})")
+
+    def _set_filter(self, key: str):
+        self._filter = key
+        self.filter_buttons[key].setChecked(True)
+        self.table.blockSignals(True)
+        self._apply_filter()
+        self.table.blockSignals(False)
+        cur = self._current_fiber()
+        self._select_row_for(cur.display if cur else None)
+
+    def _apply_filter(self):
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 0)
+            state = item.data(Qt.UserRole + 1) if item else None
+            self.table.setRowHidden(r, self._filter != "all" and state != self._filter)
+
+    def _fiber_at(self, row: int) -> Fiber | None:
+        item = self.table.item(row, 0) if row >= 0 else None
+        idx = item.data(Qt.UserRole) if item else None
+        return self._row_fibers[idx] if idx is not None and idx < len(self._row_fibers) else None
+
+    def _current_fiber(self) -> Fiber | None:
+        return self._fiber_at(self.table.currentRow())
+
+    def _selected_fibers(self) -> list[Fiber]:
+        rows = sorted({i.row() for i in self.table.selectionModel().selectedRows()}) \
+            if self.table.selectionModel() else []
+        return [f for f in (self._fiber_at(r) for r in rows if not self.table.isRowHidden(r)) if f]
 
     def _fiber_selected(self):
-        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
-        if not rows or not self.current_cable:
-            self._show_fiber(None)
+        self._show_fiber(self._current_fiber() if self.current_cable else None)
+
+    # ---------- αφαίρεση / επαναφορά (δεξί κλικ)
+    def _remove_paths(self, paths: list[Path], what: str):
+        removed = self.project.remove_paths(paths)
+        if not removed:
             return
-        row = rows[0].row()
-        self._show_fiber(self._row_fibers[row] if row < len(self._row_fibers) else None)
+        self._removed.extend(p for p in removed if p not in self._removed)
+        self._refresh()
+        self.statusBar().showMessage(
+            f"Αφαιρέθηκε {what} ({len(removed)} αρχεία). Δεξί κλικ → «Επαναφορά αφαιρεμένων» για να ξαναμπούν.",
+            10000)
+
+    def _remove_selected(self):
+        fibers = self._selected_fibers()
+        if fibers:
+            what = f"η μέτρηση {fibers[0].display}" if len(fibers) == 1 else f"{len(fibers)} μετρήσεις"
+            self._remove_paths([p for f in fibers for p in f.paths], what)
+
+    def _restore_removed(self):
+        paths = [p for p in self._removed if p.exists()]
+        missing = len(self._removed) - len(paths)
+        self._removed = []
+        if missing:
+            QMessageBox.warning(self, APP_NAME, f"{missing} αφαιρεμένα αρχεία δεν υπάρχουν πια στον δίσκο.")
+        if paths:
+            self.load_paths(paths)
+        else:
+            self._refresh()
+
+    def _table_menu(self, pos):
+        self._build_table_menu(pos).exec(self.table.viewport().mapToGlobal(pos))
+
+    def _build_table_menu(self, pos) -> QMenu:
+        row = self.table.rowAt(pos.y())
+        if row >= 0 and not self.table.item(row, 0).isSelected():
+            self.table.selectRow(row)
+        fibers = self._selected_fibers()
+        menu = QMenu(self)
+        if fibers:
+            if len(fibers) == 1:
+                f = fibers[0]
+                menu.addAction(f"Αφαίρεση μέτρησης «{f.display}»", self._remove_selected)
+                if len(f.measurements) > 1:
+                    for w in f.wavelengths:
+                        m = f.measurements[w]
+                        menu.addAction(f"Αφαίρεση μόνο του {w} nm ({m.path.name})",
+                                       lambda p=m.path, w=w, f=f: self._remove_paths([p], f"το {w} nm της {f.display}"))
+            else:
+                menu.addAction(f"Αφαίρεση {len(fibers)} μετρήσεων", self._remove_selected)
+            menu.addSeparator()
+        start = str(fibers[0].paths[0].parent) if fibers and fibers[0].paths else None
+        menu.addAction("Προσθήκη αρχείων .sor…", lambda: self.add_files(start))
+        if self._removed:
+            menu.addAction(f"Επαναφορά αφαιρεμένων ({len(self._removed)})", self._restore_removed)
+        if len(fibers) == 1 and fibers[0].paths:
+            menu.addSeparator()
+            for p in fibers[0].paths:
+                menu.addAction(f"Άνοιγμα θέσης: {p.name}", lambda p=p: reveal_file(p))
+        return menu
+
+    def _tree_menu(self, pos):
+        self._build_tree_menu(pos).exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _build_tree_menu(self, pos) -> QMenu:
+        item = self.tree.itemAt(pos)
+        menu = QMenu(self)
+        cable = self.project.cables.get(item.data(0, Qt.UserRole)) if item else None
+        if cable:
+            paths = [p for f in cable.fibers.values() for p in f.paths]
+            menu.addAction(f"Αφαίρεση καλωδίου «{cable.name}» ({len(paths)} αρχεία)",
+                           lambda: self._remove_paths(paths, f"το καλώδιο {cable.name}"))
+            menu.addSeparator()
+        menu.addAction("Προσθήκη αρχείων .sor…", self.add_files)
+        if self._removed:
+            menu.addAction(f"Επαναφορά αφαιρεμένων ({len(self._removed)})", self._restore_removed)
+        return menu
 
     def _show_fiber(self, fiber: Fiber | None):
         self.plot.clear()
@@ -650,6 +936,7 @@ class MainWindow(QMainWindow):
                     pg.InfLineLabel(line, str(i), position=0.95, color="#24292f")
                     self.plot.addItem(line)
             tbl = QTableWidget(0, 8)
+            tbl.setItemDelegate(KeepColorDelegate(tbl))
             tbl.setHorizontalHeaderLabels(event_headers(t, units))
             tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
             tbl.verticalHeader().setVisible(False)
@@ -661,7 +948,7 @@ class MainWindow(QMainWindow):
                     if is_seg:
                         x.setForeground(QBrush(QColor("#6e7781")))
                     if c == 7 and ok is not None:
-                        x.setBackground(QBrush(PASS_BG if ok else FAIL_BG))
+                        paint_verdict(x, ok)
                     tbl.setItem(r, c, x)
             tbl.resizeColumnsToContents()
             att = f"{s.attenuation:.3f}" if s.attenuation is not None else "–"

@@ -90,6 +90,11 @@ class Fiber:
     def wavelengths(self) -> list[int]:
         return sorted(self.measurements)
 
+    @property
+    def paths(self) -> list[Path]:
+        """Όλα τα αρχεία της μέτρησης, μαζί με τα διπλότυπα."""
+        return [m.path for m in self.measurements.values()] + list(self.duplicates)
+
 
 @dataclass
 class Cable:
@@ -154,6 +159,20 @@ class Project:
             return []
         parts = max((_parts(i.cable) for _, _, i in self._items), key=len)
         return [(k, "_".join(parts[:k])) for k in range(1, len(parts) + 1)]
+
+    def remove_paths(self, paths: Iterable[Path]) -> list[Path]:
+        """Αφαιρεί αρχεία από το έργο και επιστρέφει όσα αφαιρέθηκαν.
+
+        Τα αρχεία ξεχνιούνται εντελώς, ώστε να μπορούν να ξαναπροστεθούν με load().
+        Αν μια μέτρηση είχε διπλότυπο για το ίδιο μήκος κύματος, το διπλότυπο παίρνει τη θέση της.
+        """
+        targets = {Path(p).resolve() for p in paths}
+        removed = [p for p, _, _ in self._items if p in targets]
+        if removed:
+            self._items = [it for it in self._items if it[0] not in targets]
+            self._seen.difference_update(removed)
+            self.regroup()
+        return removed
 
     def add(self, path: Path, sor: SorFile) -> None:
         self._items.append((path, sor, parse_name(path)))

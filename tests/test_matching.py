@@ -67,3 +67,41 @@ def test_synthetic_launch_cable(tmp_path):
     assert abs(s.launch_km - 0.1) < 0.002
     assert s.events[0].role == "launch" and s.events[1].role == "start"
     assert s.events[1].rel_km == 0
+
+
+def test_remove_and_readd(tmp_path):
+    make_cable(tmp_path, "R_SCP1", 3)
+    p = Project()
+    p.load(find_sor_files(tmp_path))
+    f2 = p.cables["R_SCP1"].fiber(2)
+    removed = p.remove_paths(f2.paths)
+    assert len(removed) == 2 and p.file_count == 4
+    assert p.cables["R_SCP1"].fiber(2) is None
+    p.load(find_sor_files(tmp_path))                 # ξανά ολόκληρος ο φάκελος: μπαίνουν μόνο τα 2
+    assert p.file_count == 6 and p.cables["R_SCP1"].fiber(2).wavelengths == [1310, 1550]
+
+
+def test_remove_one_wavelength_and_duplicate_promotion(tmp_path):
+    import shutil
+    make_cable(tmp_path / "a", "D_SCP1", 2)
+    dup = tmp_path / "b" / "D_SCP1_1550_0001.sor"
+    dup.parent.mkdir()
+    shutil.copy(tmp_path / "a" / "D_SCP1_1550_0001.sor", dup)
+    p = Project()
+    p.load(find_sor_files(tmp_path))
+    f1 = p.cables["D_SCP1"].fiber(1)
+    assert len(f1.duplicates) == 1
+    first = f1.measurements[1550].path
+    p.remove_paths([first])
+    f1 = p.cables["D_SCP1"].fiber(1)
+    assert f1.measurements[1550].path != first and not f1.duplicates   # το διπλότυπο πήρε τη θέση
+    p.remove_paths([f1.measurements[1550].path])
+    assert p.cables["D_SCP1"].fiber(1).wavelengths == [1310]
+    assert [f.number for f in p.cables["D_SCP1"].incomplete()] == [1]
+
+
+def test_remove_unknown_path_is_noop(tmp_path):
+    make_cable(tmp_path, "N_SCP1", 1)
+    p = Project()
+    p.load(find_sor_files(tmp_path))
+    assert p.remove_paths([tmp_path / "nope.sor"]) == [] and p.file_count == 2
