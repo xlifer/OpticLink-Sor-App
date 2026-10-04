@@ -25,7 +25,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 WizardStyle=modern
 
 [Languages]
-Name: "greek"; MessagesFile: "compiler:Languages\Greek.isl"
+; Μόνο αγγλικά: το Inno Setup 6.7 δεν έχει πλέον επίσημο Greek.isl (το ίδιο το πρόγραμμα είναι στα ελληνικά)
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
