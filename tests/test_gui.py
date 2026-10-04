@@ -159,9 +159,10 @@ def test_cancel_button_is_reported(qapp):
     got = []
 
     def job(w):
-        while not w.cancelled:
+        deadline = time.time() + 20          # ποτέ ατέρμονος βρόχος, ακόμη κι αν χαθεί το σήμα
+        while not w.cancelled and time.time() < deadline:
             time.sleep(0.01)
-        return "stopped"
+        return "stopped" if w.cancelled else "timeout"
     parent = QtWidgets.QWidget()
     j = appmod.run_with_progress(parent, "test", job, lambda res, cancelled: got.append((res, cancelled)))
     wait(qapp, lambda: j.dlg.isVisible())
