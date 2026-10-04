@@ -155,7 +155,7 @@ class SettingsDialog(QDialog):
         lay.addWidget(g1)
 
         th = s.thresholds
-        g2 = QGroupBox("Κριτήρια Pass / Fail")
+        g2 = QGroupBox("Κριτήρια Pass / Fail (ξετσέκαρε για καθόλου PASS/FAIL)")
         g2.setCheckable(True)
         g2.setChecked(th.enabled)
         self.g2 = g2
@@ -165,21 +165,35 @@ class SettingsDialog(QDialog):
             w = QDoubleSpinBox(); w.setRange(lo, hi); w.setDecimals(dec)
             w.setSingleStep(step); w.setValue(val); w.setSuffix(suffix)
             return w
+
+        def row(text, checked, *spins):
+            cb = QCheckBox(text)
+            cb.setChecked(checked)
+            box = QHBoxLayout()
+            for sp in spins:
+                box.addWidget(sp)
+                sp.setEnabled(checked)
+                cb.toggled.connect(sp.setEnabled)
+            box.addStretch()
+            f2.addRow(cb, box)
+            return cb
         self.splice = dspin(th.max_splice_loss, 0, 5, suffix=" dB")
         self.conn = dspin(th.max_connector_loss, 0, 5, suffix=" dB")
         self.refl = dspin(th.max_reflectance, -80, 0, 0.5, 1, " dB")
         self.att1310 = dspin(th.max_attenuation.get("1310", 0.4), 0, 5, 0.01, 3, " dB/km")
         self.att1550 = dspin(th.max_attenuation.get("1550", 0.3), 0, 5, 0.01, 3, " dB/km")
         self.att1625 = dspin(th.max_attenuation.get("1625", 0.35), 0, 5, 0.01, 3, " dB/km")
+        for sp, lbl in ((self.att1310, "1310: "), (self.att1550, "1550: "), (self.att1625, "1625: ")):
+            sp.setPrefix(lbl)
         self.total = dspin(th.max_total_loss, 0, 60, 0.1, 2, " dB")
-        self.total.setSpecialValueText("χωρίς έλεγχο")
-        f2.addRow("Μέγ. απώλεια κόλλησης", self.splice)
-        f2.addRow("Μέγ. απώλεια connector", self.conn)
-        f2.addRow("Μέγ. ανάκλαση", self.refl)
-        f2.addRow("Μέγ. εξασθένηση 1310", self.att1310)
-        f2.addRow("Μέγ. εξασθένηση 1550", self.att1550)
-        f2.addRow("Μέγ. εξασθένηση 1625", self.att1625)
-        f2.addRow("Μέγ. συνολική απώλεια", self.total)
+        self.cb_splice = row("Μέγ. απώλεια κόλλησης", th.check_splice, self.splice)
+        self.cb_conn = row("Μέγ. απώλεια connector", th.check_connector, self.conn)
+        self.cb_refl = row("Μέγ. ανάκλαση", th.check_reflectance, self.refl)
+        self.cb_att = row("Μέγ. εξασθένηση", th.check_attenuation, self.att1310, self.att1550, self.att1625)
+        self.cb_total = row("Μέγ. συνολική απώλεια", th.check_total_loss, self.total)
+        note = QLabel("Το PASS/FAIL βγαίνει μόνο από τα κριτήρια με τσεκ.")
+        note.setStyleSheet("color:#57606a")
+        f2.addRow(note)
         lay.addWidget(g2)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -204,6 +218,11 @@ class SettingsDialog(QDialog):
         s.chart_mode = self.chart.currentData()
         th = s.thresholds
         th.enabled = self.g2.isChecked()
+        th.check_splice = self.cb_splice.isChecked()
+        th.check_connector = self.cb_conn.isChecked()
+        th.check_reflectance = self.cb_refl.isChecked()
+        th.check_attenuation = self.cb_att.isChecked()
+        th.check_total_loss = self.cb_total.isChecked()
         th.max_splice_loss = self.splice.value()
         th.max_connector_loss = self.conn.value()
         th.max_reflectance = self.refl.value()
@@ -307,8 +326,9 @@ class MainWindow(QMainWindow):
             self.settings = ReportSettings.from_json(self.qs.value("report", "", str) or "{}")
         except Exception:
             self.settings = ReportSettings()
-        self.project = Project()
+        self.project = Project(group_level=self._saved_level())
         self.current_cable: Cable | None = None
+        self._row_fibers: list[Fiber] = []
 
         tb = self.addToolBar("main")
         tb.setMovable(False)
@@ -328,6 +348,15 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         act("Ρυθμίσεις αναφοράς", st.StandardPixmap.SP_FileDialogDetailedView, self.edit_settings)
         self.act_pdf = act("Δημιουργία PDF", st.StandardPixmap.SP_DialogSaveButton, self.export, "Ctrl+P")
+        tb.addSeparator()
+        tb.addWidget(QLabel("  Καλώδιο = "))
+        self.group_combo = QComboBox()
+        self.group_combo.setMinimumWidth(260)
+        self.group_combo.setToolTip(
+            "Ποιο μέρος του ονόματος αρχείου (πριν από το 1310/1550) είναι το καλώδιο.\n"
+            "Ό,τι περισσεύει εμφανίζεται δίπλα στον αριθμό της ίνας.")
+        self.group_combo.activated.connect(self._group_changed)
+        tb.addWidget(self.group_combo)
 
         # Αριστερά: καλώδια
         self.tree = QTreeWidget()
@@ -437,13 +466,41 @@ class MainWindow(QMainWindow):
 
         run_with_progress(self, "Φόρτωση αρχείων…", job, done)
 
+    def _saved_level(self) -> int | None:
+        v = int(self.qs.value("groupLevel", 0) or 0)
+        return v or None
+
+    def _fill_group_combo(self):
+        c = self.group_combo
+        c.blockSignals(True)
+        c.clear()
+        p = self.project
+        examples = p.level_examples()
+        auto_name = dict(examples).get(p.level_used, "") if p.group_level is None else ""
+        c.addItem(f"Αυτόματα  →  {auto_name}" if auto_name else "Αυτόματα", 0)
+        for level, name in examples:
+            c.addItem(name, level)
+        if p.group_level and p.group_level > len(examples):
+            c.addItem(f"{p.group_level} τμήματα", p.group_level)
+        idx = c.findData(p.group_level or 0)
+        c.setCurrentIndex(max(idx, 0))
+        c.blockSignals(False)
+
+    def _group_changed(self, _index):
+        level = self.group_combo.currentData() or None
+        self.qs.setValue("groupLevel", level or 0)
+        self.project.group_level = level
+        self.project.regroup()
+        self._refresh()
+
     def clear(self):
-        self.project = Project()
+        self.project = Project(group_level=self._saved_level())
         self.current_cable = None
         self._refresh()
 
     # ---------- προβολή
     def _refresh(self):
+        self._fill_group_combo()
         self.tree.clear()
         th = self.settings.thresholds
         for c in self.project.sorted_cables():
@@ -471,6 +528,7 @@ class MainWindow(QMainWindow):
 
     def _show_cable(self, cable: Cable | None):
         self.current_cable = cable
+        self._row_fibers = []
         self.table.clear()
         self.table.setRowCount(0)
         if not cable:
@@ -485,11 +543,11 @@ class MainWindow(QMainWindow):
         self.table.setColumnCount(len(heads))
         self.table.setHorizontalHeaderLabels(heads)
         fibers = cable.sorted_fibers()
+        self._row_fibers = fibers
         self.table.setRowCount(len(fibers))
         th = self.settings.thresholds
         for r, f in enumerate(fibers):
-            it = QTableWidgetItem(f.label or str(f.number))
-            it.setData(Qt.UserRole, f.number)
+            it = QTableWidgetItem(f.display)
             self.table.setItem(r, 0, it)
             col = 1
             for w in wls:
@@ -526,8 +584,8 @@ class MainWindow(QMainWindow):
         if not rows or not self.current_cable:
             self._show_fiber(None)
             return
-        num = self.table.item(rows[0].row(), 0).data(Qt.UserRole)
-        self._show_fiber(self.current_cable.fibers.get(num))
+        row = rows[0].row()
+        self._show_fiber(self._row_fibers[row] if row < len(self._row_fibers) else None)
 
     def _show_fiber(self, fiber: Fiber | None):
         self.plot.clear()

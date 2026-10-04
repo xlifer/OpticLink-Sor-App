@@ -49,7 +49,10 @@ def test_cancel_stops_without_file(tmp_path):
 def test_real_grandway_file_in_report(tmp_path):
     sor = parse_sor(SAMPLE, with_trace=False)
     cable = Cable("GW")
-    cable.fibers[1] = Fiber("GW", 1, "1", {1550: Measurement(SAMPLE, 1550, sor)})
-    out = generate_reports([(cable, [cable.fibers[1]])], tmp_path, ReportSettings())
+    cable.fibers[(1, "")] = Fiber("GW", 1, "1", measurements={1550: Measurement(SAMPLE, 1550, sor)})
+    out = generate_reports([(cable, [cable.fiber(1)])], tmp_path, ReportSettings())
     assert out[0].stat().st_size > 10_000
-    assert evaluate(sor, ReportSettings().thresholds) is False  # connector 0.796 dB > 0.75
+    th = ReportSettings().thresholds
+    assert evaluate(sor, th) is False  # connector 0.796 dB > 0.75
+    th.check_connector = False
+    assert evaluate(sor, th) is True   # ανακλάσεις -32 dB δεν μετράνε από προεπιλογή

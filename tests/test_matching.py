@@ -27,7 +27,7 @@ def test_pairing_and_missing(tmp_path):
     c = p.cables["FARM1.R01_SCP31"]
     assert len(c.fibers) == 300
     assert c.wavelengths == [1310, 1550]
-    f = c.fibers[117]
+    f = c.fiber(117)
     assert {w: m.path.name for w, m in f.measurements.items()} == {
         1310: "FARM1.R01_SCP31_1310_0117.sor", 1550: "FARM1.R01_SCP31_1550_0117.sor"}
     assert [f.number for f in c.incomplete()] == [12, 250]
@@ -39,3 +39,11 @@ def test_loading_same_folder_twice_is_ignored(tmp_path):
     p.load(find_sor_files(tmp_path))
     p.load(find_sor_files(tmp_path))
     assert p.file_count == 6
+
+
+def test_auto_grouping_keeps_single_cable_name(tmp_path):
+    make_cable(tmp_path, "FARM1.R01_SCP31", 4)
+    p = Project()
+    p.load(find_sor_files(tmp_path))
+    assert list(p.cables) == ["FARM1.R01_SCP31"]
+    assert [f.display for f in p.cables["FARM1.R01_SCP31"].sorted_fibers()] == ["0001", "0002", "0003", "0004"]

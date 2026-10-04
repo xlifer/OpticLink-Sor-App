@@ -47,7 +47,7 @@ TEXT = {
         "page": "Σελίδα", "of": "από", "fibers": "Ίνες", "pass": "PASS", "fail": "FAIL",
         "otdr": "Όργανο", "generated": "Δημιουργήθηκε", "incomplete": "Ίνες χωρίς όλα τα μήκη κύματος",
         "types": {"Αρχή": "Αρχή", "Τέλος": "Τέλος", "Ανακλαστικό": "Ανακλαστικό", "Μη ανακλ.": "Μη ανακλ."},
-        "signature": "Υπογραφή",
+        "signature": "Υπογραφή", "criteria": "Κριτήρια PASS",
     },
     "en": {
         "title": "OTDR Test Report",
@@ -62,7 +62,7 @@ TEXT = {
         "page": "Page", "of": "of", "fibers": "Fibers", "pass": "PASS", "fail": "FAIL",
         "otdr": "Instrument", "generated": "Generated", "incomplete": "Fibers missing a wavelength",
         "types": {"Αρχή": "Start", "Τέλος": "End", "Ανακλαστικό": "Reflective", "Μη ανακλ.": "Non-refl."},
-        "signature": "Signature",
+        "signature": "Signature", "criteria": "PASS criteria",
     },
 }
 
@@ -338,7 +338,7 @@ class ReportBuilder:
         result_cols = [4 * i + 4 for i in range(len(wls))] + [len(head) - 1]
         n_pass = n_fail = 0
         for f in fibers:
-            row = [f.label or str(f.number)]
+            row = [f.display]
             overall = True
             for w in wls:
                 m = f.measurements.get(w)
@@ -358,15 +358,17 @@ class ReportBuilder:
             n_fail += overall is False
             rows.append(row)
         avail = A4[0] - 24 * mm
-        first = 16 * mm
+        first = (30 if any(f.sub for f in fibers) else 16) * mm
         rest = (avail - first - 21 * mm) / max(1, 4 * len(wls))
         widths = [first] + [rest] * (4 * len(wls)) + [21 * mm]
         story.append(self._table(rows, widths, result_col=result_cols, font_size=6.5))
         story.append(Spacer(1, 3 * mm))
-        if self.s.thresholds.enabled:
+        crit = criteria_text(self.s.thresholds, self.s.language)
+        if crit:
             story.append(Paragraph(
                 f"{t['pass']}: <b>{n_pass}</b> &nbsp; · &nbsp; {t['fail']}: <b>{n_fail}</b>", self.st["n"]))
-        miss = [f.label or str(f.number) for f in fibers if set(f.measurements) != set(wls)]
+            story.append(Paragraph(f"{t['criteria']}: {_esc(crit)}", self.st["small"]))
+        miss = [f.display for f in fibers if set(f.measurements) != set(wls)]
         if miss:
             story.append(Paragraph(f"{t['incomplete']}: " + ", ".join(miss), self.st["small"]))
         story.append(PageBreak())
@@ -376,7 +378,7 @@ class ReportBuilder:
     def fiber_story(self, cable: Cable, fiber: Fiber, sors: dict[int, SorFile]):
         t = self.t
         wls = cable.wavelengths
-        title = f"{t['cable']}: {cable.name}   ·   {t['fiber']}: {fiber.label or fiber.number}"
+        title = f"{t['cable']}: {cable.name}   ·   {t['fiber']}: {fiber.display}"
         story = [self._header(t["title"], title), Spacer(1, 3 * mm)]
 
         # Πίνακας στοιχείων μέτρησης
@@ -421,6 +423,9 @@ class ReportBuilder:
             foot.append(f"{t['otdr']}: {_esc(' '.join(filter(None, [s_inst.supplier, s_inst.otdr_model, s_inst.otdr_sn])))}")
         if self.s.operator:
             foot.append(f"{t['operator']}: {_esc(self.s.operator)}")
+        crit = criteria_text(self.s.thresholds, self.s.language)
+        if crit:
+            foot.append(f"{t['criteria']}: {_esc(crit)}")
         if foot:
             story.append(Spacer(1, 2 * mm))
             story.append(Paragraph(" &nbsp; · &nbsp; ".join(foot), self.st["small"]))
@@ -461,7 +466,7 @@ class ReportBuilder:
                         pass
                 story += self.fiber_story(cable, fiber, sors)
                 done += 1
-                if progress and progress(done, total, f"{cable.name} / {fiber.label}") is False:
+                if progress and progress(done, total, f"{cable.name} / {fiber.display}") is False:
                     return False
         if story and isinstance(story[-1], PageBreak):
             story.pop()
@@ -486,6 +491,26 @@ class ReportBuilder:
         doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
         tmp.replace(out_path)
         return True
+
+
+def criteria_text(th, lang: str = "el") -> str:
+    """Σύντομη περιγραφή των ενεργών κριτηρίων, π.χ. "κόλληση ≤ 0.30 dB, connector ≤ 0.75 dB"."""
+    if not th.enabled:
+        return ""
+    el = lang == "el"
+    out = []
+    if th.check_splice:
+        out.append(f"{'κόλληση' if el else 'splice'} ≤ {th.max_splice_loss:.2f} dB")
+    if th.check_connector:
+        out.append(f"connector ≤ {th.max_connector_loss:.2f} dB")
+    if th.check_reflectance:
+        out.append(f"{'ανάκλαση' if el else 'reflectance'} ≤ {th.max_reflectance:.1f} dB")
+    if th.check_attenuation:
+        att = ", ".join(f"{k}: {v:.3f}" for k, v in sorted(th.max_attenuation.items()))
+        out.append(f"{'εξασθένηση' if el else 'attenuation'} ≤ {att} dB/km")
+    if th.check_total_loss:
+        out.append(f"{'συνολική απώλεια' if el else 'total loss'} ≤ {th.max_total_loss:.2f} dB")
+    return ", ".join(out)
 
 
 def _esc(s: str) -> str:
