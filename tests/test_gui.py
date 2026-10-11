@@ -273,3 +273,13 @@ def test_export_all_in_one(qapp, tmp_path):
     dlg.all_in_one.setChecked(True)
     assert not dlg.per_cable.isChecked() and not dlg.cables.isEnabled()
     assert sum(len(f) for _, f in dlg.parts()) == 5
+
+
+def test_app_and_window_icon_from_program_icon(qapp, monkeypatch):
+    monkeypatch.setattr(appmod.QSettings, "value", lambda self, key, default=None, type=None: default)
+    monkeypatch.setattr(appmod.QSettings, "setValue", lambda self, key, value: None)
+    icon = appmod.app_icon()
+    assert sorted(s.width() for s in icon.availableSizes()) == [16, 32, 48, 256]
+    w = appmod.MainWindow()
+    assert sorted(s.width() for s in w.windowIcon().availableSizes()) == [16, 32, 48, 256]
+    _dispose(w, qapp)

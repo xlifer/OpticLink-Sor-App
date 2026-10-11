@@ -58,6 +58,18 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.ver.outputs.version }} installer\setup.iss
+      - name: Icons embedded in the exe and Setup.exe (= icon.ico from program_icon.png)
+        shell: bash
+        run: python tools/check_icons.py exe dist/GrandwayBatchReport/GrandwayBatchReport.exe dist/GrandwayBatchReport-Setup-*.exe
+      - name: Installed program - window / taskbar icon
+        shell: bash
+        run: python tools/check_icons.py installed "$(ls dist/GrandwayBatchReport-Setup-*.exe)" build/icon-check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: icon-check
+          path: build/icon-check/*.png
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: GrandwayBatchReport-Setup-${{ steps.ver.outputs.version }}

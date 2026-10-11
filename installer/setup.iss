@@ -15,6 +15,7 @@ DefaultGroupName=Grandway Batch Report
 UsePreviousGroup=no
 OutputDir=..\dist
 OutputBaseFilename=GrandwayBatchReport-Setup-{#AppVersion}
+; εικονίδιο του Setup.exe: το ίδιο icon.ico με το exe (από το program_icon.png, tools/make_icon.py)
 SetupIconFile=..\otdr_report\icon.ico
 UninstallDisplayIcon={app}\GrandwayBatchReport.exe
 Compression=lzma2/max
@@ -42,9 +43,10 @@ Type: filesandordirs; Name: "{autoprograms}\OTDR Batch Report"
 Source: "..\dist\GrandwayBatchReport\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Grandway Batch Report"; Filename: "{app}\GrandwayBatchReport.exe"
+; Ίδιο AppUserModelID με το πρόγραμμα (app.py), ώστε η γραμμή εργασιών να δείχνει το εικονίδιο του exe
+Name: "{group}\Grandway Batch Report"; Filename: "{app}\GrandwayBatchReport.exe"; IconFilename: "{app}\GrandwayBatchReport.exe"; AppUserModelID: "GrandwayBatchReport.App"
 Name: "{group}\{cm:UninstallProgram,Grandway Batch Report}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Grandway Batch Report"; Filename: "{app}\GrandwayBatchReport.exe"; Tasks: desktopicon
+Name: "{autodesktop}\Grandway Batch Report"; Filename: "{app}\GrandwayBatchReport.exe"; IconFilename: "{app}\GrandwayBatchReport.exe"; AppUserModelID: "GrandwayBatchReport.App"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\GrandwayBatchReport.exe"; Description: "{cm:LaunchProgram,Grandway Batch Report}"; Flags: nowait postinstall skipifsilent

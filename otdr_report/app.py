@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pyqtgraph as pg
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
@@ -100,6 +100,24 @@ def resource(name: str) -> Path:
         if p.exists():
             return p
     return base / name
+
+
+def app_icon() -> QIcon:
+    """Το εικονίδιο της εφαρμογής (παράθυρο και γραμμή εργασιών), από το program_icon.png.
+
+    Φορτώνεται από PNG (16/32/48/256), που τα διαβάζει το ίδιο το Qt χωρίς plugin· το .ico μόνο
+    αν λείπουν τα PNG. Τα ίδια frames έχει και το icon.ico του exe και του Setup.exe.
+    """
+    icon = QIcon()
+    for n in (16, 32, 48, 256):
+        p = resource(f"assets/app_icon_{n}.png")
+        if p.exists():
+            icon.addFile(str(p), QSize(n, n))
+    if icon.isNull():
+        ico = resource("icon.ico")
+        if ico.exists():
+            icon = QIcon(str(ico))
+    return icon
 
 
 def open_folder(path: Path):
@@ -472,9 +490,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {__version__}")
-        icon = resource("icon.ico")
-        if icon.exists():
-            self.setWindowIcon(QIcon(str(icon)))
+        self.setWindowIcon(app_icon())
         self.resize(1400, 860)
         self.setAcceptDrops(True)
         self.qs = QSettings(SETTINGS_ORG, SETTINGS_APP)
@@ -1255,7 +1271,13 @@ def selftest(out_dir: Path) -> int:
             assert len(cable.fibers) == 12 and [f.number for f in cable.incomplete()] == [5]
             written = generate_reports([(cable, cable.sorted_fibers())], out_dir, ReportSettings())
             assert written and written[0].stat().st_size > 10_000
-        log.write_text("OK\n", encoding="utf-8")
+        # εικονίδιο μέσα στο παγωμένο exe: και τα 4 μεγέθη από το program_icon.png
+        app = QApplication.instance() or QApplication([sys.argv[0]])
+        icon = app_icon()
+        sizes = sorted(s.width() for s in icon.availableSizes())
+        assert sizes == [16, 32, 48, 256], f"μεγέθη εικονιδίου {sizes}"
+        assert not icon.pixmap(32, 32).isNull()
+        log.write_text(f"OK icon={sizes}\n", encoding="utf-8")
         return 0
     except Exception as e:  # noqa: BLE001
         log.write_text(f"FAIL {type(e).__name__}: {e}\n", encoding="utf-8")
@@ -1279,9 +1301,7 @@ def main():
     data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
     overrides.use_store(overrides.OverrideStore(data_dir / "event_overrides.json"))
     app.setStyle("Fusion")
-    icon = resource("icon.ico")
-    if icon.exists():
-        app.setWindowIcon(QIcon(str(icon)))     # εικονίδιο στη γραμμή εργασιών των Windows
+    app.setWindowIcon(app_icon())               # εικονίδιο στη γραμμή εργασιών των Windows
     w = MainWindow()
     w.show()
     args = [Path(a) for a in sys.argv[1:] if Path(a).exists()]
