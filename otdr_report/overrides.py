@@ -12,6 +12,7 @@ import json
 import threading
 from pathlib import Path
 
+from .jsonstore import load_dict
 from .sor import SorFile
 
 KINDS = ("connector", "splice")
@@ -21,14 +22,13 @@ class OverrideStore:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else None
         self._lock = threading.Lock()
+        raw, self.load_error = load_dict(self.path)
         self._data: dict[str, dict[str, str]] = {}
-        if self.path and self.path.exists():
-            try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-                self._data = {d: {str(k): v for k, v in ev.items() if v in KINDS}
-                              for d, ev in raw.items() if isinstance(ev, dict)}
-            except (OSError, ValueError):
-                self._data = {}
+        for d, ev in raw.items():
+            if isinstance(d, str) and isinstance(ev, dict):
+                ok = {str(k): v for k, v in ev.items() if isinstance(v, str) and v in KINDS}
+                if ok:
+                    self._data[d] = ok
 
     @staticmethod
     def _key(distance_km: float) -> str:

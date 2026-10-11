@@ -12,6 +12,7 @@ import json
 import threading
 from pathlib import Path
 
+from .jsonstore import load_dict
 from .sor import SorFile
 
 # πεδίο διόρθωσης → πεδίο του SorFile
@@ -27,14 +28,14 @@ class InfoStore:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else None
         self._lock = threading.Lock()
+        raw, self.load_error = load_dict(self.path)
+        # μόνο έγκυρες εγγραφές: {digest: {πεδίο: κείμενο}}· ό,τι άλλο αγνοείται
         self._data: dict[str, dict[str, str]] = {}
-        if self.path and self.path.exists():
-            try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-                self._data = {d: {k: str(v) for k, v in vals.items() if k in FIELDS}
-                              for d, vals in raw.items() if isinstance(vals, dict)}
-            except (OSError, ValueError):
-                self._data = {}
+        for d, vals in raw.items():
+            if isinstance(d, str) and isinstance(vals, dict):
+                ok = {k: v for k, v in vals.items() if k in FIELDS and isinstance(v, str)}
+                if ok:
+                    self._data[d] = ok
 
     def get(self, digest: str) -> dict[str, str]:
         with self._lock:

@@ -184,5 +184,5 @@ def test_events_title_never_left_alone(tmp_path):
                 if re.fullmatch(r"Events – (1310|1550) nm", line):
                     # μαζί του στην ίδια σελίδα: επικεφαλίδες στηλών και τουλάχιστον μία γραμμή
                     rest = " ".join(lines[j + 1:j + 4])
-                    assert "Distance" in rest, f"{n} συμβάντα, σελίδα {k}: τίτλος χωρίς πίνακα"
+                    assert "Distance" in rest or "Dist." in rest, f"{n} συμβάντα, σελίδα {k}: τίτλος χωρίς πίνακα"
                     assert len(lines) > j + 2, f"{n} συμβάντα, σελίδα {k}: τίτλος χωρίς γραμμές"

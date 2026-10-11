@@ -373,18 +373,26 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
         length = ends[0].distance_km if ends else (events[-1].distance_km if events else 0.0)
 
     trace = np.zeros(0, dtype=np.float32)
-    if with_trace and "DataPts" in blocks:
+    if "DataPts" in blocks:
+        # Η δομή ελέγχεται πάντα (και χωρίς ανάγνωση καμπύλης): τα σημεία πρέπει να είναι μέσα
+        # στο ίδιο το τμήμα και τα πλήθη να συμφωνούν. Ποτέ bytes από άλλο τμήμα ως μέτρηση.
+        d_off, d_size = blocks["DataPts"]
+        d_end = d_off + d_size
         d = block("DataPts")
-        d.u32()
-        d.u16()
+        total = d.u32()
+        groups = d.u16()
+        if groups != 1:
+            raise SorError(f"Μη υποστηριζόμενο ή κατεστραμμένο DataPts: {groups} ομάδες συντελεστή κλίμακας")
         npts = d.u32()
         scale = d.u16() / 1000
-        end = d.p + npts * 2
-        if end > len(data):
-            npts = (len(data) - d.p) // 2
-        raw = np.frombuffer(data, dtype="<u2", count=npts, offset=d.p)
-        # Όπως το δείχνει το όργανο: 0 dB = κάτω όριο, όσο πιο ψηλά τόσο περισσότερο σήμα
-        trace = ((65535 - raw.astype(np.float32)) * scale / 1000).astype(np.float32)
+        if npts != total:
+            raise SorError(f"Κατεστραμμένο αρχείο: το DataPts δηλώνει {total} σημεία αλλά η ομάδα {npts}")
+        if d.p + npts * 2 > d_end:
+            raise SorError("Κατεστραμμένο αρχείο: τα σημεία του DataPts ξεπερνούν το τμήμα")
+        if with_trace:
+            raw = np.frombuffer(data, dtype="<u2", count=npts, offset=d.p)
+            # Όπως το δείχνει το όργανο: 0 dB = κάτω όριο, όσο πιο ψηλά τόσο περισσότερο σήμα
+            trace = ((65535 - raw.astype(np.float32)) * scale / 1000).astype(np.float32)
 
     date = None
     if ts:

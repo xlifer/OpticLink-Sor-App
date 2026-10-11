@@ -19,13 +19,16 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 
 from . import __version__
 from .matching import Cable, Fiber, Project, _natural_key, find_sor_files
-from .pdf_report import TEXT, Units, event_headers, event_rows, fiber_verdict, generate_reports
+from .pdf_report import (TEXT, Units, event_headers, event_rows, existing_pdf_conflicts, fiber_verdict,
+                         generate_reports)
 from .linkmap_widget import LinkMapWidget
 from . import fiber_info, overrides
 from .settings import ReportSettings, evaluate, is_dead_fiber, prepare
 from .sor import parse_sor
 
 APP_NAME = "Grandway Batch Report"
+APP_MUTEX = "GrandwayBatchReport.Running"      # ίδιο όνομα με το AppMutex του installer/setup.iss
+_APP_MUTEX = None
 # Σταθερά, για να μη χαθούν οι αποθηκευμένες ρυθμίσεις μετά τη μετονομασία
 SETTINGS_ORG, SETTINGS_APP = "OTDRBatchReport", "OTDR Batch Report"
 WL_QCOLORS = {1310: "#1f6feb", 1550: "#d1242f", 1625: "#8250df", 1490: "#1a7f37", 850: "#bf8700"}
@@ -1288,12 +1291,30 @@ class MainWindow(QMainWindow):
         self._save_settings()
         parts = dlg.parts()
         settings = self.settings
+        overwrite = False
+        clash = existing_pdf_conflicts(parts, out_dir, settings)
+        if clash:                       # ποτέ σιωπηλή αντικατάσταση προηγούμενου παραδοτέου
+            box = QMessageBox(self)
+            box.setWindowTitle(APP_NAME)
+            box.setIcon(QMessageBox.Warning)
+            box.setText(f"Στον φάκελο υπάρχουν ήδη {len(clash)} PDF με το ίδιο όνομα "
+                        "(χωρίς διάκριση πεζών/κεφαλαίων):\n\n" + "\n".join(p.name for p in clash[:15])
+                        + ("\n…" if len(clash) > 15 else ""))
+            b_new = box.addButton("Νέο όνομα (2), (3)…", QMessageBox.AcceptRole)
+            b_over = box.addButton("Αντικατάσταση", QMessageBox.DestructiveRole)
+            box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(b_new)
+            box.exec()
+            if box.clickedButton() is b_over:
+                overwrite = True
+            elif box.clickedButton() is not b_new:
+                return
 
         def job(w: Worker):
             def prog(done, total, label):
                 w.progress.emit(done, total, label)
                 return not w.cancelled
-            return generate_reports(parts, out_dir, settings, prog)
+            return generate_reports(parts, out_dir, settings, prog, overwrite=overwrite)
 
         def done(result, cancelled):
             # Ό,τι άλλαξε στον δίσκο (νέα μέτρηση, αρχείο που χάθηκε) φαίνεται και στην οθόνη
@@ -1394,6 +1415,9 @@ def main():
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GrandwayBatchReport.App")
+            # Ο installer (AppMutex) βλέπει ότι το πρόγραμμα τρέχει και ζητά να κλείσει πριν την αναβάθμιση
+            global _APP_MUTEX
+            _APP_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, APP_MUTEX)
         except Exception:
             pass
     app = QApplication(sys.argv)
@@ -1407,6 +1431,9 @@ def main():
     app.setWindowIcon(app_icon())               # εικονίδιο στη γραμμή εργασιών των Windows
     w = MainWindow()
     w.show()
+    problems = [e for e in (overrides.STORE.load_error, fiber_info.STORE.load_error) if e]
+    if problems:                                # αλλοιωμένο αρχείο διορθώσεων: ξεκινά κανονικά, με ενημέρωση
+        QMessageBox.warning(w, APP_NAME, "\n\n".join(problems))
     args = [Path(a) for a in sys.argv[1:] if Path(a).exists()]
     if args:
         w.load_paths(args)
