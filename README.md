@@ -113,7 +113,7 @@ Build σε Windows:
 
 ```bat
 pyinstaller --noconfirm GrandwayBatchReport.spec
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=2.1.0 installer\setup.iss
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=3.0.0 installer\setup.iss
 ```
 
 Το workflow `.github/workflows/build-windows.yml` τα κάνει αυτόματα σε κάθε push:

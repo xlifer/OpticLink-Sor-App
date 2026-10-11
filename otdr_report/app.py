@@ -27,8 +27,6 @@ from .settings import ReportSettings, evaluate, is_dead_fiber, prepare
 from .sor import parse_sor
 
 APP_NAME = "Grandway Batch Report"
-APP_MUTEX = "GrandwayBatchReport.Running"      # ίδιο όνομα με το AppMutex του installer/setup.iss
-_APP_MUTEX = None
 # Σταθερά, για να μη χαθούν οι αποθηκευμένες ρυθμίσεις μετά τη μετονομασία
 SETTINGS_ORG, SETTINGS_APP = "OTDRBatchReport", "OTDR Batch Report"
 WL_QCOLORS = {1310: "#1f6feb", 1550: "#d1242f", 1625: "#8250df", 1490: "#1a7f37", 850: "#bf8700"}
@@ -587,6 +585,11 @@ class MainWindow(QMainWindow):
         act("Ρυθμίσεις αναφοράς", st.StandardPixmap.SP_FileDialogDetailedView, self.edit_settings)
         self.act_pdf = act("Δημιουργία PDF", st.StandardPixmap.SP_DialogSaveButton, self.export, "Ctrl+P")
         tb.addSeparator()
+        self.act_cables = act("Καλώδια", st.StandardPixmap.SP_FileDialogListView, lambda on: self.toggle_cables(on))
+        self.act_cables.setCheckable(True)
+        self.act_cables.setChecked(True)
+        self.act_cables.setToolTip("Εμφάνιση / απόκρυψη του πάνελ καλωδίων (ή σύρε το διαχωριστικό του)")
+        tb.addSeparator()
         tb.addWidget(QLabel("  Καλώδιο = "))
         self.group_combo = QComboBox()
         self.group_combo.setMinimumWidth(260)
@@ -674,16 +677,16 @@ class MainWindow(QMainWindow):
         self.events_tabs = QTabWidget()
         self.events_tabs.currentChanged.connect(self._sync_linkmap)
 
-        # Διάταξη: αριστερά γράφημα / Link map / μετρήσεις — δεξιά καλώδια / συμβάντα.
-        # Όλα τα όρια μετακινούνται (πάνω-κάτω, δεξιά-αριστερά) και θυμούνται το μέγεθός τους.
-        self.left_split = QSplitter(Qt.Vertical)
-        self.left_split.addWidget(self.plot)
-        self.left_split.addWidget(self.linkmap)
-        self.left_split.addWidget(table_box)
-        self.left_split.setStretchFactor(0, 5)
-        self.left_split.setStretchFactor(1, 1)
-        self.left_split.setStretchFactor(2, 4)
-        self.left_split.setSizes([430, 120, 330])
+        # Διάταξη σε δύο σειρές, με ανεξάρτητο κάθετο διαχωριστικό η καθεμία:
+        #   πάνω:  γράφημα / Link map  |  καλώδια   (τα καλώδια κλείνουν μέχρι τέρμα δεξιά)
+        #   κάτω:  μετρήσεις            |  συμβάντα 1310/1550 (κρατούν το ελάχιστο πλάτος τους)
+        # Όλα τα όρια μετακινούνται και θυμούνται το μέγεθός τους.
+        self.chart_split = QSplitter(Qt.Vertical)
+        self.chart_split.addWidget(self.plot)
+        self.chart_split.addWidget(self.linkmap)
+        self.chart_split.setStretchFactor(0, 4)
+        self.chart_split.setStretchFactor(1, 1)
+        self.chart_split.setSizes([400, 130])
 
         cables_box = QWidget()
         cl = QVBoxLayout(cables_box)
@@ -692,44 +695,90 @@ class MainWindow(QMainWindow):
         hint.setStyleSheet("color:#57606a; padding:4px")
         cl.addWidget(self.tree)
         cl.addWidget(hint)
-        self.right_split = QSplitter(Qt.Vertical)
-        self.right_split.addWidget(cables_box)
-        self.right_split.addWidget(self.events_tabs)
-        self.right_split.setSizes([300, 580])
+        # χωρίς ελάχιστο πλάτος: το πάνελ στενεύει όσο θέλει ο χρήστης (το Qt αγνοεί το 0, γι' αυτό 1)
+        hint.setWordWrap(True)
+        for wdg in (cables_box, self.tree, hint):
+            wdg.setMinimumWidth(1)
+        self.cables_box = cables_box
 
-        self.main_split = QSplitter(Qt.Horizontal)
-        self.main_split.addWidget(self.left_split)
-        self.main_split.addWidget(self.right_split)
-        self.main_split.setStretchFactor(0, 3)
-        self.main_split.setStretchFactor(1, 2)
-        self.main_split.setSizes([920, 520])
-        for sp in (self.left_split, self.right_split, self.main_split):
+        self.top_split = QSplitter(Qt.Horizontal)
+        self.top_split.addWidget(self.chart_split)
+        self.top_split.addWidget(cables_box)
+        self.top_split.setStretchFactor(0, 3)
+        self.top_split.setStretchFactor(1, 2)
+        self.top_split.setSizes([920, 520])
+
+        self.bottom_split = QSplitter(Qt.Horizontal)
+        self.bottom_split.addWidget(table_box)
+        self.bottom_split.addWidget(self.events_tabs)
+        self.bottom_split.setStretchFactor(0, 3)
+        self.bottom_split.setStretchFactor(1, 2)
+        self.bottom_split.setSizes([920, 520])
+
+        self.outer_split = QSplitter(Qt.Vertical)
+        self.outer_split.addWidget(self.top_split)
+        self.outer_split.addWidget(self.bottom_split)
+        self.outer_split.setStretchFactor(0, 1)
+        self.outer_split.setStretchFactor(1, 1)
+        self.outer_split.setSizes([480, 420])
+        for sp in (self.chart_split, self.top_split, self.bottom_split, self.outer_split):
             sp.setChildrenCollapsible(False)
             sp.setHandleWidth(6)
+        self.top_split.setCollapsible(1, True)        # τα καλώδια μπορούν να κλείσουν εντελώς
+        self.top_split.splitterMoved.connect(lambda *_: self._sync_cables_action())
+        self._cables_width = 520
 
         central = QWidget()
         vl = QVBoxLayout(central)
         vl.setContentsMargins(0, 0, 0, 0)
         vl.setSpacing(0)
-        vl.addWidget(self.main_split, 1)
+        vl.addWidget(self.outer_split, 1)
         self.setCentralWidget(central)
         self._restore_layout()
         self._refresh()
 
+    LAYOUT = (("layout3/outer", "outer_split"), ("layout3/top", "top_split"),
+              ("layout3/bottom", "bottom_split"), ("layout3/chart", "chart_split"))
+
     def _restore_layout(self):
-        for key, sp in (("splitMain", self.main_split), ("splitLeft", self.left_split),
-                        ("splitRight", self.right_split)):
+        for key, attr in self.LAYOUT:
             state = self.qs.value(key)
             if state is not None:
                 try:
-                    sp.restoreState(state)
+                    getattr(self, attr).restoreState(state)
                 except (TypeError, ValueError):
                     pass
+        self._sync_cables_action()
 
     def _save_layout(self):
-        self.qs.setValue("splitMain", self.main_split.saveState())
-        self.qs.setValue("splitLeft", self.left_split.saveState())
-        self.qs.setValue("splitRight", self.right_split.saveState())
+        for key, attr in self.LAYOUT:
+            self.qs.setValue(key, getattr(self, attr).saveState())
+
+    # ---------- πάνελ καλωδίων: κλείσιμο μέχρι τέρμα δεξιά και εύκολο άνοιγμα
+    def cables_visible(self) -> bool:
+        return self.top_split.sizes()[1] > 0
+
+    def toggle_cables(self, show: bool | None = None):
+        sizes = self.top_split.sizes()
+        total = sum(sizes)
+        if show is None:
+            show = sizes[1] == 0
+        if show and sizes[1] == 0:
+            w = min(max(self._cables_width, 220), max(220, total // 2))
+            self.top_split.setSizes([total - w, w])
+        elif not show and sizes[1] > 0:
+            self._cables_width = sizes[1]
+            self.top_split.setSizes([total, 0])
+        self._sync_cables_action()
+
+    def _sync_cables_action(self):
+        if hasattr(self, "top_split") and self.top_split.sizes()[1] > 0:
+            self._cables_width = self.top_split.sizes()[1]      # για το «άνοιγμα» στο ίδιο πλάτος
+        act = getattr(self, "act_cables", None)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(self.cables_visible())
+            act.blockSignals(False)
 
     def closeEvent(self, e):
         self._save_layout()
@@ -1415,9 +1464,6 @@ def main():
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GrandwayBatchReport.App")
-            # Ο installer (AppMutex) βλέπει ότι το πρόγραμμα τρέχει και ζητά να κλείσει πριν την αναβάθμιση
-            global _APP_MUTEX
-            _APP_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, APP_MUTEX)
         except Exception:
             pass
     app = QApplication(sys.argv)

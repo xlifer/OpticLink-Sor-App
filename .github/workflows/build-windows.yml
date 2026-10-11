@@ -30,7 +30,7 @@ jobs:
   windows:
     needs: test
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,6 +58,22 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.ver.outputs.version }} installer\setup.iss
+      - name: Build the previous release 2.1.0 (for the real upgrade test)
+        run: |
+          git fetch --depth=1 origin 7e220cae64e8756ff1439bc787648bbd2bc77c5c
+          git worktree add ..\old 7e220cae64e8756ff1439bc787648bbd2bc77c5c
+          cd ..\old
+          pyinstaller --noconfirm GrandwayBatchReport.spec
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=2.1.0 installer\setup.iss
+      - name: Upgrade 2.1.0 -> new version (app open, then closed)
+        shell: bash
+        run: python tools/check_upgrade.py ../old/dist/GrandwayBatchReport-Setup-2.1.0.exe "$(ls dist/GrandwayBatchReport-Setup-*.exe)" dist/GrandwayBatchReport build/upgrade-check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upgrade-check
+          path: build/upgrade-check/*.log
+          if-no-files-found: ignore
       - name: Icons embedded in the exe and Setup.exe (= icon.ico from program_icon.png)
         shell: bash
         run: python tools/check_icons.py exe dist/GrandwayBatchReport/GrandwayBatchReport.exe dist/GrandwayBatchReport-Setup-*.exe

@@ -316,3 +316,38 @@ def test_info_dialog_single_and_bulk(qapp, tmp_path, monkeypatch):
     menu = [a.text() for a in w._build_table_menu(w.table.visualItemRect(w.table.item(0, 0)).center()).actions()]
     assert any(t.startswith("Στοιχεία μέτρησης") for t in menu)
     _dispose(w, qapp)
+
+
+def test_cables_panel_resizes_independently_and_layout_persists(qapp, monkeypatch):
+    store = {}
+    monkeypatch.setattr(appmod.QSettings, "value", lambda self, key, default=None, type=None: store.get(key, default))
+    monkeypatch.setattr(appmod.QSettings, "setValue", lambda self, key, value: store.__setitem__(key, value))
+    w = appmod.MainWindow()
+    w.resize(1400, 860)
+    w.show()
+    qapp.processEvents()
+    events_before = w.bottom_split.sizes()
+    total = sum(w.top_split.sizes())
+    # σύρσιμο του διαχωριστικού των καλωδίων τέρμα δεξιά: κλείνει εντελώς
+    w.top_split.moveSplitter(total, 1)
+    qapp.processEvents()
+    assert w.top_split.sizes()[1] == 0 and not w.cables_visible()
+    assert w.bottom_split.sizes() == events_before                          # οι μετρήσεις δεν επηρεάστηκαν
+    assert w.events_tabs.width() >= w.events_tabs.minimumSizeHint().width()
+    assert not w.act_cables.isChecked()
+    # αποθήκευση / επαναφορά μετά το κλείσιμο
+    w._save_layout()
+    w2 = appmod.MainWindow()
+    w2.resize(1400, 860)
+    w2.show()
+    qapp.processEvents()
+    assert w2.top_split.sizes()[1] == 0 and w2.bottom_split.sizes()[1] > 0
+    # εύκολο άνοιγμα ξανά από το κουμπί «Καλώδια»
+    w2.act_cables.trigger()
+    qapp.processEvents()
+    assert w2.cables_visible() and w2.top_split.sizes()[1] >= 200 and w2.act_cables.isChecked()
+    # και μικρό, ανεξάρτητο πλάτος
+    w2.top_split.setSizes([sum(w2.top_split.sizes()) - 60, 60])
+    assert w2.top_split.sizes()[1] == 60 and w2.bottom_split.sizes()[1] > 60
+    _dispose(w, qapp)
+    _dispose(w2, qapp)
