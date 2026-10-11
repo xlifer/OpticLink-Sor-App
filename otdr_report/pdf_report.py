@@ -22,7 +22,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (HRFlowable, Flowable, Image, KeepInFrame, PageBreak, Paragraph,
                                 SimpleDocTemplate, Spacer, Table, TableStyle)
 
-from .linkmap import asset_dir, icon_path, linkmap_events, node_kind, node_state
+from .linkmap import (asset_dir, icon_path, linkmap_events, node_kind, node_positions, node_state,
+                      scale_positions)
 from .matching import Cable, Fiber
 from .settings import ReportSettings, evaluate, event_ok, is_dead_fiber, prepare
 from .sor import SorError, SorFile, downsample, parse_sor
@@ -284,13 +285,17 @@ class TraceChart(Flowable):
 
 
 class LinkMap(Flowable):
-    """Σχηματική ζεύξη όπως στην οθόνη: από το (S) στο 0 έως το (E), χωρίς το launch cable."""
+    """Σχηματική ζεύξη όπως στο όργανο: από το (S) στο 0 έως το (E), χωρίς το launch cable.
+
+    Πάνω μπάρα κλίμακας με τα συμβάντα στην πραγματική τους θέση (κόκκινο = FAIL) και το
+    συνολικό μήκος· από κάτω τα εικονίδια με αριθμό και απόσταση, και τα μήκη των τμημάτων.
+    """
 
     def __init__(self, sor: SorFile, width: float, units: Units, th):
         super().__init__()
         self.sor = sor
         self.width = width
-        self.height = 19 * mm
+        self.height = 30 * mm
         self.units = units
         self.th = th
 
@@ -303,21 +308,39 @@ class LinkMap(Flowable):
         nodes = linkmap_events(s)
         if not nodes:
             return
-        size = 7 * mm
-        y = self.height / 2 - 1
-        x0, x1 = 6 * mm + size / 2, self.width - 6 * mm - size / 2
-        step = (x1 - x0) / max(1, len(nodes) - 1)
-        xs = [x0 + k * step for k in range(len(nodes))] if len(nodes) > 1 else [(x0 + x1) / 2]
+        size = 9 * mm
+        kms = [e.rel_km for _, e in nodes]
+        states = [node_state(e, s, self.th) for _, e in nodes]
         c.saveState()
+        # μπάρα κλίμακας
+        total = f"{u.fmt(kms[-1])}{u.name}"
+        c.setFont("DejaVu", 6.5)
+        bx0, bx1 = 4 * mm, self.width - 4 * mm - c.stringWidth(total, "DejaVu", 6.5) - 2
+        by = self.height - 5 * mm
+        c.setStrokeColor(STEEL); c.setLineWidth(1.4)
+        c.line(bx0, by, bx1, by)
+        c.setStrokeColor(colors.HexColor("#3b4a8c")); c.setLineWidth(0.5)
+        c.line(bx0, by, bx1, by)
+        for (i, _e), x, st in zip(nodes, scale_positions(kms, bx0, bx1), states):
+            col = FAIL_C if st == "fail" else colors.HexColor("#24292f")
+            c.setStrokeColor(col); c.setLineWidth(0.7)
+            c.line(x, by - 2, x, by + 2)
+            c.setFillColor(col)
+            c.drawCentredString(x, by + 3, str(i))
+        c.setFillColor(colors.black)
+        c.drawString(bx1 + 2, by - 2, total)
+        # εικονίδια
+        y = 11 * mm
+        xs = node_positions(kms, 4 * mm + size / 2, self.width - 4 * mm - size / 2, size + 6 * mm)
         line = icon_path("line")
         if line and len(xs) > 1:
-            lh = size * 0.3
+            lh = size * 0.22
             c.drawImage(str(line), xs[0], y - lh / 2, xs[-1] - xs[0], lh, mask="auto")
         else:
             c.setStrokeColor(STEEL); c.setLineWidth(1.6)
             c.line(xs[0], y, xs[-1], y)
-        for k, ((i, e), x) in enumerate(zip(nodes, xs)):
-            kind, state = node_kind(e), node_state(e, s, self.th)
+        for k, ((i, e), x, state) in enumerate(zip(nodes, xs, states)):
+            kind = node_kind(e)
             icon = icon_path(f"{kind}_{state}")
             if icon:
                 c.drawImage(str(icon), x - size / 2, y - size / 2, size, size, mask="auto")
@@ -328,15 +351,15 @@ class LinkMap(Flowable):
                     c.rect(x - 4, y - 4, 8, 8, fill=1, stroke=1)
                 else:
                     c.circle(x, y, 4, fill=1, stroke=1)
-            c.setFont("DejaVu", 6.5)
-            c.setFillColor(colors.black)
-            tag = {"start": " (S)", "end": " (E)"}.get(kind, "")
-            c.drawCentredString(x, y + size / 2 + 2, f"{i}{tag}")
-            c.setFillColor(MUTED)
-            c.drawCentredString(x, y - size / 2 - 7, u.fmt(e.rel_km))
+            if kind in ("start", "end"):
+                c.setFont("DejaVu-Bold", 6.5); c.setFillColor(FAIL_C)
+                c.drawString(x - size / 2 + 1.2, y - size / 2 + 1.2, "S" if kind == "start" else "E")
+            c.setFont("DejaVu", 6.5); c.setFillColor(colors.black)
+            c.drawString(x - size / 2, y + size / 2 + 9.5, str(i))
+            c.drawString(x - size / 2, y + size / 2 + 2.5, u.fmt(e.rel_km))
             if k:
-                c.setFillColor(STEEL)
-                c.drawCentredString((xs[k - 1] + x) / 2, y + 3, u.fmt(e.section_km))
+                c.setFillColor(colors.black)
+                c.drawCentredString((xs[k - 1] + x) / 2, y - size / 2 - 7, u.fmt(e.section_km))
         c.restoreState()
 
 

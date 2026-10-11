@@ -44,3 +44,26 @@ def node_kind(e: Event) -> str:
 def linkmap_events(sor: SorFile) -> list[tuple[int, Event]]:
     """Τα συμβάντα του Link map: χωρίς το launch cable, από το (S) έως το (E)."""
     return [(i, e) for i, e in enumerate(sor.events) if e.role != "launch"]
+
+
+def scale_positions(kms: list[float], x0: float, x1: float) -> list[float]:
+    """Θέσεις στη μπάρα κλίμακας: αναλογικές με την απόσταση από το (S)."""
+    lo = min(kms, default=0.0)
+    span = (max(kms, default=0.0) - lo) or 1.0
+    return [x0 + (k - lo) / span * (x1 - x0) for k in kms]
+
+
+def node_positions(kms: list[float], x0: float, x1: float, gap: float) -> list[float]:
+    """Θέσεις εικονιδίων όπως στο όργανο: κατά προσέγγιση αναλογικές, με ελάχιστη απόσταση `gap`."""
+    n = len(kms)
+    if n <= 1:
+        return [(x0 + x1) / 2] * n
+    if gap * (n - 1) >= x1 - x0:
+        return [x0 + k * (x1 - x0) / (n - 1) for k in range(n)]
+    xs = scale_positions(kms, x0, x1)
+    for k in range(1, n):
+        xs[k] = max(xs[k], xs[k - 1] + gap)
+    xs[-1] = min(xs[-1], x1)
+    for k in range(n - 2, -1, -1):
+        xs[k] = min(xs[k], xs[k + 1] - gap)
+    return xs
