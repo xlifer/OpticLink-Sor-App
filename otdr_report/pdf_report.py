@@ -19,10 +19,10 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (HRFlowable, Flowable, Image, PageBreak, Paragraph,
-                                SimpleDocTemplate, Spacer, Table, TableStyle)
+from reportlab.platypus import (BaseDocTemplate, Frame, HRFlowable, Flowable, Image, NextPageTemplate,
+                                PageBreak, PageTemplate, Paragraph, Spacer, Table, TableStyle)
 
-from .linkmap import (asset_dir, icon_path, line_band, linkmap_events, node_kind, node_positions,
+from .linkmap import (asset_dir, fit_labels, icon_path, line_band, linkmap_events, node_kind, node_positions,
                       node_state, scale_positions)
 from .matching import Cable, Fiber
 from .settings import ReportSettings, evaluate, event_ok, is_dead_fiber, prepare
@@ -62,6 +62,7 @@ TEXT = {
         "config": "Ρυθμίσεις μέτρησης", "test_wave": "Μήκος κύματος (nm)", "pw": "Παλμός (ns)",
         "distance": "Απόσταση (km)", "test_time": "Χρόνος μέτρησης (s)", "resolution": "Ανάλυση (m)",
         "scatter": "Σκέδαση (dB)", "start_loc": "Αρχή", "end_loc": "Τέλος", "location": "Τοποθεσία",
+        "continued": "συνέχεια",
         "cable_id": "Cable ID", "fiber_id": "Fiber ID", "measurement": "Μέτρηση",
     },
     "en": {
@@ -85,6 +86,7 @@ TEXT = {
         "config": "Configuration of Test", "test_wave": "Test Wave (nm)", "pw": "PW (ns)",
         "distance": "Distance (km)", "test_time": "Test Time (s)", "resolution": "Resolution (m)",
         "scatter": "Backscatter (dB)", "start_loc": "Start Location", "end_loc": "End Location",
+        "continued": "continued",
         "location": "Location", "cable_id": "Cable ID", "fiber_id": "Fiber ID", "measurement": "Measurement",
     },
 }
@@ -104,6 +106,7 @@ LAUNCH_C = colors.HexColor("#cf222e")
 
 
 TOP_MARGIN = 10 * mm
+CONT_HEADER = 14 * mm       # χώρος για την ταυτότητα της μέτρησης στις σελίδες συνέχειας
 BOTTOM = 14 * mm
 BOTTOM_SIG = 21 * mm
 LOGO_H = 12 * mm            # Grandway logo πάνω αριστερά, δίπλα στον τίτλο
@@ -241,15 +244,16 @@ class TraceChart(Flowable):
         if sors:
             ref = sors[0]
             c.setFont("DejaVu", 5.5)
-            for i, e in enumerate(ref.events):
-                if not xmin - 1e-9 <= e.rel_km <= xmax:
-                    continue
-                X = tx(e.rel_km)
+            marks = [(i, tx(e.rel_km)) for i, e in enumerate(ref.events) if xmin - 1e-9 <= e.rel_km <= xmax]
+            mw = [c.stringWidth(str(i), "DejaVu", 5.5) for i, _ in marks]
+            show = fit_labels([X - w / 2 for (_, X), w in zip(marks, mw)], mw, 1.5)
+            for (i, X), vis in zip(marks, show):
                 c.setStrokeColor(MUTED)
                 c.setLineWidth(0.4)
                 c.line(X, bottom + ph - 9, X, bottom + ph)
-                c.setFillColor(colors.HexColor("#24292f"))
-                c.drawCentredString(X, bottom + ph - 15, str(i))
+                if vis:                 # αριθμοί που δεν χωράνε παραλείπονται (υπάρχουν στον πίνακα)
+                    c.setFillColor(colors.HexColor("#24292f"))
+                    c.drawCentredString(X, bottom + ph - 15, str(i))
         # Μέσα στο γράφημα δεν γράφονται ονόματα αρχείων ούτε το launch cable
 
         # Υπόμνημα
@@ -292,8 +296,10 @@ class LinkMap(Flowable):
         nodes = linkmap_events(s)
         if not nodes:
             return
-        size = 9 * mm
         kms = [e.rel_km for _, e in nodes]
+        # με πολλά συμβάντα τα εικονίδια μικραίνουν ώστε να μην πέφτουν το ένα πάνω στο άλλο
+        span = self.width - 8 * mm
+        size = min(9 * mm, max(3 * mm, span / max(1, len(nodes)) * 0.8))
         states = [node_state(e, s, self.th) for _, e in nodes]
         c.saveState()
         # μπάρα κλίμακας
@@ -305,17 +311,29 @@ class LinkMap(Flowable):
         c.line(bx0, by, bx1, by)
         c.setStrokeColor(colors.HexColor("#3b4a8c")); c.setLineWidth(0.5)
         c.line(bx0, by, bx1, by)
-        for (i, _e), x, st in zip(nodes, scale_positions(kms, bx0, bx1), states):
+        sx = scale_positions(kms, bx0, bx1)
+        tw = [c.stringWidth(str(i), "DejaVu", 6.5) for i, _ in nodes]
+        show = fit_labels([x - w / 2 for x, w in zip(sx, tw)], tw, 1.5)
+        for (i, _e), x, st, vis in zip(nodes, sx, states, show):
             col = FAIL_C if st == "fail" else colors.HexColor("#24292f")
             c.setStrokeColor(col); c.setLineWidth(0.7)
             c.line(x, by - 2, x, by + 2)
-            c.setFillColor(col)
-            c.drawCentredString(x, by + 3, str(i))
+            if vis or st == "fail":
+                c.setFillColor(col)
+                c.drawCentredString(x, by + 3, str(i))
         c.setFillColor(colors.black)
         c.drawString(bx1 + 2, by - 2, total)
         # εικονίδια
         y = 11 * mm
-        xs = node_positions(kms, 4 * mm + size / 2, self.width - 4 * mm - size / 2, size + 6 * mm)
+        xs = node_positions(kms, 4 * mm + size / 2, self.width - 4 * mm - size / 2, size + min(6 * mm, size * 0.7))
+        c.setFont("DejaVu", 6.5)
+        idx_w = [c.stringWidth(str(i), "DejaVu", 6.5) for i, _ in nodes]
+        dist_w = [c.stringWidth(u.fmt(e.rel_km), "DejaVu", 6.5) for _, e in nodes]
+        show_idx = fit_labels([x - size / 2 for x in xs], idx_w)
+        show_dist = fit_labels([x - size / 2 for x in xs], dist_w)
+        mids = [(xs[k - 1] + xs[k]) / 2 for k in range(1, len(xs))]
+        sec_w = [c.stringWidth(u.fmt(e.section_km), "DejaVu", 6.5) for _, e in nodes[1:]]
+        show_sec = fit_labels([m - w / 2 for m, w in zip(mids, sec_w)], sec_w) if mids else []
         line = icon_path("line")
         if line and len(xs) > 1:
             off, lh = line_band(size)              # ίδια ευθεία και πάχος με το καλώδιο των εικονιδίων
@@ -335,13 +353,15 @@ class LinkMap(Flowable):
                     c.rect(x - 4, y - 4, 8, 8, fill=1, stroke=1)
                 else:
                     c.circle(x, y, 4, fill=1, stroke=1)
-            if kind in ("start", "end"):
+            if kind in ("start", "end") and size >= 6 * mm:
                 c.setFont("DejaVu-Bold", 6.5); c.setFillColor(FAIL_C)
                 c.drawString(x - size / 2 + 1.2, y - size / 2 + 1.2, "S" if kind == "start" else "E")
             c.setFont("DejaVu", 6.5); c.setFillColor(colors.black)
-            c.drawString(x - size / 2, y + size / 2 + 9.5, str(i))
-            c.drawString(x - size / 2, y + size / 2 + 2.5, u.fmt(e.rel_km))
-            if k:
+            if show_idx[k]:
+                c.drawString(x - size / 2, y + size / 2 + 9.5, str(i))
+            if show_dist[k]:
+                c.drawString(x - size / 2, y + size / 2 + 2.5, u.fmt(e.rel_km))
+            if k and show_sec[k - 1]:
                 c.setFillColor(colors.black)
                 c.drawCentredString((xs[k - 1] + x) / 2, y - size / 2 - 7, u.fmt(e.section_km))
         c.restoreState()
@@ -393,13 +413,36 @@ class _Cancelled(Exception):
     pass
 
 
-class _CancellableDoc(SimpleDocTemplate):
-    """Ελέγχει για ακύρωση και κατά το γράψιμο του PDF (όχι μόνο πριν)."""
+class _Running(Flowable):
+    """Μηδενικού μεγέθους σημάδι: ορίζει την ταυτότητα (καλώδιο / μέτρηση) για τις σελίδες συνέχειας."""
 
-    def __init__(self, *args, keep_going=None, **kw):
+    def __init__(self, holder: dict, text: str):
+        super().__init__()
+        self.holder, self.text = holder, text
+
+    def wrap(self, aw, ah):
+        return 0, 0
+
+    def draw(self):
+        self.holder["text"] = self.text
+
+
+class _CancellableDoc(BaseDocTemplate):
+    """Ελέγχει για ακύρωση και κατά το γράψιμο του PDF (όχι μόνο πριν).
+
+    Δύο πρότυπα σελίδας: "main" για την πρώτη σελίδα κάθε μέτρησης και "cont" για τις σελίδες
+    συνέχειας, με δεσμευμένο χώρο πάνω για την ταυτότητα της μέτρησης.
+    """
+
+    def __init__(self, *args, keep_going=None, on_page=None, on_cont=None, **kw):
         super().__init__(*args, **kw)
         self._keep_going = keep_going
         self._count = 0
+        w = self.width
+        main = Frame(self.leftMargin, self.bottomMargin, w, self.height, id="main")
+        cont = Frame(self.leftMargin, self.bottomMargin, w, self.height - CONT_HEADER, id="cont")
+        self.addPageTemplates([PageTemplate("main", [main], onPage=on_page),
+                               PageTemplate("cont", [cont], onPage=on_cont)])
 
     def afterFlowable(self, flowable):
         self._count += 1
@@ -412,6 +455,7 @@ class ReportBuilder:
         _register_fonts()
         self.s = settings
         self.t = TEXT.get(settings.language, TEXT["en"])
+        self._running = {"text": ""}     # ταυτότητα τρέχουσας μέτρησης για τις σελίδες συνέχειας
         # ύψος περιοχής κειμένου: μία σελίδα ανά μέτρηση
         self._frame_h = A4[1] - TOP_MARGIN - (BOTTOM_SIG if settings.signatures else BOTTOM) - 12 - 1   # 12 = padding πλαισίου (6+6 pt)
         self.st = {
@@ -482,25 +526,31 @@ class ReportBuilder:
         ]))
         return tbl
 
-    def _table(self, rows, col_widths, result_col=None, font_size=7, muted_rows=()):
+    def _table(self, rows, col_widths, result_col=None, font_size=7, muted_rows=(), title=None):
         head_style = ParagraphStyle("th", fontName="DejaVu-Bold", fontSize=font_size,
                                     leading=font_size + 1.5, textColor=HEAD_FG, alignment=1)
         rows = [[Paragraph(_esc(str(h)), head_style) for h in rows[0]]] + rows[1:]
-        tbl = Table(rows, colWidths=col_widths, repeatRows=1)
+        off = 0
+        if title:                       # γραμμή τίτλου πάνω από τις επικεφαλίδες, επαναλαμβανόμενη
+            off = 1
+            tstyle = ParagraphStyle("tt", fontName="DejaVu-Bold", fontSize=9, leading=11, textColor=STEEL)
+            rows = [[Paragraph(_esc(title), tstyle)] + [""] * (len(rows[0]) - 1)] + rows
+            muted_rows = {i + 1 for i in muted_rows}
+        tbl = Table(rows, colWidths=col_widths, repeatRows=1 + off)
         style = [
             ("FONT", (0, 0), (-1, -1), "DejaVu", font_size),
-            ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG),
+            ("BACKGROUND", (0, off), (-1, off), HEAD_BG),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("GRID", (0, 0), (-1, -1), 0.3, GRID_C),
             ("TOPPADDING", (0, 0), (-1, -1), 1.6), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.6),
             ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
         ]
-        for i in range(1, len(rows)):
+        for i in range(1 + off, len(rows)):
             if i in muted_rows:
                 style.append(("TEXTCOLOR", (0, i), (-1, i), MUTED))
                 style.append(("FONT", (0, i), (-1, i), "DejaVu", font_size - 0.5))
-            elif i % 2 == 0 and not muted_rows:
+            elif (i - off) % 2 == 0 and not muted_rows:
                 style.append(("BACKGROUND", (0, i), (-1, i), ZEBRA))
             if result_col is not None:
                 for col in ([result_col] if isinstance(result_col, int) else result_col):
@@ -513,6 +563,11 @@ class ReportBuilder:
                         style.append(("FONT", (col, i), (col, i), "DejaVu-Bold", font_size))
                     elif val == self.t["missing"]:
                         style.append(("TEXTCOLOR", (col, i), (col, i), WARN_C))
+        if off:                         # ο τίτλος χωρίς πλαίσιο, όπως οι επικεφαλίδες ενοτήτων
+            style = [x for x in style if x[0] != "GRID"]
+            style += [("GRID", (0, 1), (-1, -1), 0.3, GRID_C), ("SPAN", (0, 0), (-1, 0)),
+                      ("ALIGN", (0, 0), (-1, 0), "LEFT"), ("LEFTPADDING", (0, 0), (-1, 0), 0),
+                      ("TOPPADDING", (0, 0), (-1, 0), 3)]
         tbl.setStyle(TableStyle(style))
         return tbl
 
@@ -529,7 +584,8 @@ class ReportBuilder:
         th = self.s.thresholds
         wls = cable.wavelengths
         units = Units(max((s.length_km for f in fibers for s in read[f.key].values()), default=0))
-        story = [self._header(t["title"], f"{t['summary']}: <b>{_esc(cable.name)}</b>"), Spacer(1, 4 * mm)]
+        story = [_Running(self._running, f"{t['summary']}: {cable.name}"), NextPageTemplate("cont"),
+                 self._header(t["title"], f"{t['summary']}: <b>{_esc(cable.name)}</b>"), Spacer(1, 4 * mm)]
         info = f"{t['cable']}: <b>{_esc(cable.name)}</b> &nbsp; · &nbsp; {t['fibers']}: <b>{len(fibers)}</b>"
         info += " &nbsp; · &nbsp; λ: <b>" + ", ".join(f"{w} nm" for w in wls) + "</b>"
         story.append(Paragraph(info, self.st["n"]))
@@ -573,7 +629,7 @@ class ReportBuilder:
         miss = [f.display for f in fibers if not cable.required <= set(read[f.key])]
         if miss:
             story.append(Paragraph(f"{t['incomplete']}: " + ", ".join(miss), self.st["small"]))
-        story.append(PageBreak())
+        story += [NextPageTemplate("main"), PageBreak()]
         return story
 
     # ---------- σελίδα ίνας ----------
@@ -624,7 +680,9 @@ class ReportBuilder:
         units = Units(max((s.length_km for s in present), default=0))
         width = A4[0] - 24 * mm
         subtitle = f"{t['cable']}: {_esc(cable.name)} &nbsp; · &nbsp; {t['fiber']}: <b>{_esc(fiber.display)}</b>"
-        story = [self._header(t["title"], subtitle, fiber_verdict(fiber, cable.required, th, sors)),
+        running = f"{t['cable']}: {cable.name}  ·  {t['fiber']}: {fiber.display}"
+        story = [_Running(self._running, running), NextPageTemplate("cont"),
+                 self._header(t["title"], subtitle, fiber_verdict(fiber, cable.required, th, sors)),
                  Spacer(1, 2 * mm)]
 
         # 1. Στοιχεία οργάνου
@@ -702,7 +760,7 @@ class ReportBuilder:
         tail = []
         # Συμβάντα ανά μήκος κύματος, κάτω-κάτω στη σελίδα
         for s in present:
-            tail.append(self._section(f"{t['events']} – {s.wavelength} nm"))
+            tail.append(Spacer(1, 2 * mm))
             tail.append(self._events_table(s, units))
         if foot:
             tail += [Spacer(1, 1.5 * mm), Paragraph(" &nbsp; · &nbsp; ".join(foot), self.st["small"])]
@@ -722,7 +780,8 @@ class ReportBuilder:
             story.append(TraceChart(present, width, min(55 * mm, max(35 * mm, free)), units, "",
                                     t["launch_cable"]))
         story += tail
-        return story + [PageBreak()]      # αν δεν χωράει (πολλά συμβάντα), οι πίνακες συνεχίζουν σε 2η σελίδα
+        # αν δεν χωράει (πολλά συμβάντα), οι πίνακες συνεχίζουν σε σελίδα "cont" με την ταυτότητα πάνω
+        return story + [NextPageTemplate("main"), PageBreak()]
 
     def _machine_table(self, ref, width: float):
         t = self.t
@@ -750,7 +809,9 @@ class ReportBuilder:
                 muted.add(len(rows) - 1)
         w = A4[0] - 24 * mm
         widths = [8 * mm, 32 * mm] + [(w - 40 * mm - 20 * mm) / 5] * 5 + [20 * mm]
-        return self._table(rows, widths, result_col=7, muted_rows=muted)
+        # ο τίτλος με το λ είναι γραμμή του πίνακα: επαναλαμβάνεται σε κάθε συνέχεια και δεν μένει μόνος
+        return self._table(rows, widths, result_col=7, muted_rows=muted,
+                           title=f"{t['events']} – {s.wavelength} nm")
 
     # ---------- κατασκευή αρχείου ----------
     def build(self, out_path: Path, parts: list[tuple[Cable, list[Fiber], dict]],
@@ -772,6 +833,30 @@ class ReportBuilder:
         stamp = datetime.now().strftime("%d/%m/%Y %H:%M")
         signatures = self.s.signatures
 
+        running = self._running
+
+        def on_cont(c, doc):
+            """Σελίδα συνέχειας: logo, ταυτότητα μέτρησης και «συνέχεια» πάνω, μετά το κανονικό υποσέλιδο."""
+            on_page(c, doc)
+            c.saveState()
+            top = A4[1] - TOP_MARGIN
+            logo = asset_dir() / "grandway_logo.png"
+            lw = 0
+            if logo.is_file():
+                lh = 8 * mm
+                lw = lh * 411 / 201
+                c.drawImage(str(logo), 12 * mm, top - lh, lw, lh, mask="auto", preserveAspectRatio=True)
+            c.setFont("DejaVu-Bold", 9)
+            c.setFillColor(colors.black)
+            c.drawString(12 * mm + lw + 4 * mm, top - 5 * mm, running["text"])
+            c.setFont("DejaVu", 7)
+            c.setFillColor(MUTED)
+            c.drawRightString(A4[0] - 12 * mm, top - 5 * mm, f"({t['continued']})")
+            c.setStrokeColor(GOLD)
+            c.setLineWidth(1)
+            c.line(12 * mm, top - 10 * mm, A4[0] - 12 * mm, top - 10 * mm)
+            c.restoreState()
+
         def on_page(c, doc):
             c.saveState()
             c.setFont("DejaVu", 6.5)
@@ -791,9 +876,10 @@ class ReportBuilder:
         doc = _CancellableDoc(str(tmp), pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
                               topMargin=TOP_MARGIN, bottomMargin=BOTTOM_SIG if signatures else BOTTOM,
                               title=f"{t['title']} – " + ", ".join(p[0].name for p in parts),
-                              author=self.s.company or "", keep_going=keep_going)
+                              author=self.s.company or "", keep_going=keep_going,
+                              on_page=on_page, on_cont=on_cont)
         try:
-            doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+            doc.build(story)
         except _Cancelled:
             tmp.unlink(missing_ok=True)
             return False

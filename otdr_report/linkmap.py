@@ -81,3 +81,25 @@ def line_band(size: float) -> tuple[float, float]:
     """(απόσταση από την πάνω πλευρά του εικονιδίου, ύψος) για το line.png, σε μονάδες σχεδίασης."""
     k = size / ICON_PX
     return LINE_SHIFT_PX * k, LINE_PX * k
+
+
+def fit_labels(lefts: list[float], widths: list[float], pad: float = 2.0) -> list[bool]:
+    """Ποιες ετικέτες χωράνε χωρίς να πέφτουν η μία πάνω στην άλλη (από αριστερά, με προτίμηση στην τελευταία).
+
+    Με πολλά κοντινά συμβάντα δείχνονται όσες χωράνε· όλα τα συμβάντα μένουν στον πίνακα.
+    """
+    n = len(lefts)
+    show = [False] * n
+    last_right = None
+    for k in range(n):
+        if last_right is None or lefts[k] >= last_right + pad:
+            show[k] = True
+            last_right = lefts[k] + widths[k]
+    if n and not show[-1]:
+        for k in range(n - 2, -1, -1):          # η τελευταία (το τέλος) φαίνεται πάντα
+            if show[k] and lefts[k] + widths[k] + pad > lefts[-1]:
+                show[k] = False
+            elif show[k]:
+                break
+        show[-1] = True
+    return show

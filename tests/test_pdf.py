@@ -116,3 +116,72 @@ def test_english_default_and_new_sections(tmp_path):
                    "Configuration of Test", "Start Location", "End Location", "Link map"):
         assert needle in txt, needle
     assert txt.index("1310 nm") < txt.index("1550 nm")
+
+
+# ---------- Έλεγχος Codex eae9192: σελίδες συνέχειας ----------
+def _with_extra_events(tmp_path, n, **kw):
+    """PDF από τα πραγματικά scp51 με n επιπλέον συμβάντα ανά λ· επιστρέφει (pdf, ίνες)."""
+    import copy
+    from otdr_report.matching import Project, find_sor_files
+    from otdr_report.pdf_report import ReportBuilder
+    from otdr_report.settings import prepare
+    from otdr_report.sor import parse_sor
+    p = Project()
+    p.load([f for f in find_sor_files(Path(__file__).parent / "data") if "scp51" in f.name])
+    cable = p.sorted_cables()[0]
+    fibers = cable.sorted_fibers()
+    s = ReportSettings(summary_page=False, **kw)
+    read = {}
+    for f in fibers:
+        sors = {w: prepare(parse_sor(m.path), s) for w, m in f.measurements.items()}
+        for sor in sors.values():
+            mid = sor.events[1]
+            extra = []
+            for k in range(n):
+                e = copy.copy(mid)
+                e.distance_km = mid.distance_km + 0.0005 * (k + 1)
+                extra.append(e)
+            sor.events = sor.events[:2] + extra + sor.events[2:]
+            sor.apply_launch(sor.user_offset_km)
+        read[f.key] = sors
+    out = tmp_path / f"x{n}.pdf"
+    assert ReportBuilder(s).build(out, [(cable, fibers, read)])
+    return out, fibers
+
+
+def _page_texts(pdf: Path) -> list[str]:
+    try:
+        from pypdf import PdfReader
+        return [pg.extract_text() or "" for pg in PdfReader(pdf).pages]
+    except ImportError:
+        import shutil, subprocess
+        if not shutil.which("pdftotext"):
+            pytest.skip("χρειάζεται pypdf ή pdftotext")
+        return [subprocess.run(["pdftotext", "-f", str(i), "-l", str(i), "-layout", str(pdf), "-"],
+                               capture_output=True, text=True).stdout for i in range(1, _pages(pdf) + 1)]
+
+
+def test_continuation_pages_identify_measurement_and_wavelength(tmp_path):
+    import re
+    out, fibers = _with_extra_events(tmp_path, 40)
+    texts = _page_texts(out)
+    assert len(texts) > len(fibers)
+    for k, txt in enumerate(texts, 1):
+        assert sum(f.display in txt for f in fibers) == 1, f"σελίδα {k}: χωρίς ταυτότητα μέτρησης"
+        # κάθε τμήμα πίνακα συμβάντων ξεκινά με το λ του (γραμμή τίτλου του ίδιου του πίνακα)
+        assert re.search(r"Events – (1310|1550) nm", txt), f"σελίδα {k}: χωρίς ένδειξη λ"
+    assert sum("(continued)" in t for t in texts) == len(texts) - len(fibers)
+
+
+def test_events_title_never_left_alone(tmp_path):
+    import re
+    for n in range(1, 17):              # σαρώνει τα όρια αλλαγής σελίδας
+        out, _ = _with_extra_events(tmp_path, n)
+        for k, txt in enumerate(_page_texts(out), 1):
+            lines = [x.strip() for x in txt.strip().splitlines() if x.strip()]
+            for j, line in enumerate(lines):
+                if re.fullmatch(r"Events – (1310|1550) nm", line):
+                    # μαζί του στην ίδια σελίδα: επικεφαλίδες στηλών και τουλάχιστον μία γραμμή
+                    rest = " ".join(lines[j + 1:j + 4])
+                    assert "Distance" in rest, f"{n} συμβάντα, σελίδα {k}: τίτλος χωρίς πίνακα"
+                    assert len(lines) > j + 2, f"{n} συμβάντα, σελίδα {k}: τίτλος χωρίς γραμμές"

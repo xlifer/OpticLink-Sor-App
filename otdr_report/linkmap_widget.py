@@ -6,7 +6,8 @@ from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSizePolicy, QToolTip, QWidget
 
 from .linkmap import (KINDS, STATES, asset_dir, icon_path, linkmap_events,  # noqa: F401
-                      line_band, node_kind, node_positions, node_state, scale_positions)
+                      fit_labels, line_band, node_kind, node_positions, node_state,
+                      scale_positions)
 from .sor import Event, SorFile
 
 PASS_C, FAIL_C, GREY_C = QColor("#1a7f37"), QColor("#cf222e"), QColor("#8c959f")
@@ -74,18 +75,29 @@ class LinkMapWidget(QWidget):
         by = fm.height() + 6
         p.setPen(QPen(QColor("#3b4a8c"), 2))
         p.drawLine(QPointF(bx0, by), QPointF(bx1, by))
-        for (i, _e), x, st in zip(nodes, scale_positions(kms, bx0, bx1), states):
+        sx = scale_positions(kms, bx0, bx1)
+        tw = [fm.horizontalAdvance(str(i)) for i, _ in nodes]
+        show = fit_labels([x - w / 2 for x, w in zip(sx, tw)], tw, 3)
+        for (i, _e), x, st, vis in zip(nodes, sx, states, show):
             col = FAIL_C if st == "fail" else QColor("#24292f")
             p.setPen(QPen(col, 1.2))
             p.drawLine(QPointF(x, by - 4), QPointF(x, by + 4))
-            p.drawText(QRectF(x - 20, by - fm.height() - 4, 40, fm.height()), Qt.AlignCenter, str(i))
+            if vis or st == "fail":
+                p.drawText(QRectF(x - 20, by - fm.height() - 4, 40, fm.height()), Qt.AlignCenter, str(i))
         p.setPen(QColor("#24292f"))
         p.drawText(QPointF(bx1 + 4, by + fm.ascent() / 2 - 1), total)
         # εικονίδια: κατά προσέγγιση αναλογικά, με ελάχιστη απόσταση
         top = by + 16 + 2 * fm.height()
         size = max(26, min(54, int(h - top - fm.height() - 10)))
+        size = max(12, min(size, int((w - 28) / max(1, len(nodes)) * 0.8)))   # πολλά συμβάντα → μικρότερα
         y = top + size / 2
-        xs = node_positions(kms, 14 + size / 2, w - 14 - size / 2, size + 24)
+        xs = node_positions(kms, 14 + size / 2, w - 14 - size / 2, size + min(24, size * 0.7))
+        show_idx = fit_labels([x - size / 2 for x in xs], [fm.horizontalAdvance(str(i)) for i, _ in nodes])
+        show_dist = fit_labels([x - size / 2 for x in xs],
+                               [fm.horizontalAdvance(self._fmt(e.rel_km)) for _, e in nodes])
+        mids = [(xs[k - 1] + xs[k]) / 2 for k in range(1, len(xs))]
+        sec_w = [fm.horizontalAdvance(self._fmt(e.section_km)) for _, e in nodes[1:]]
+        show_sec = fit_labels([m - sw / 2 for m, sw in zip(mids, sec_w)], sec_w, 4) if mids else []
         if self._line and len(xs) > 1:
             off, lh = line_band(size)              # ίδια ευθεία και πάχος με το καλώδιο των εικονιδίων
             p.drawPixmap(QRectF(xs[0], y - size / 2 + off, xs[-1] - xs[0], lh), self._line,
@@ -105,7 +117,7 @@ class LinkMapWidget(QWidget):
                 p.setBrush(QColor("white"))
                 p.drawRoundedRect(rect.adjusted(-3, -3, 3, 3), 5, 5)
                 self._draw_fallback(p, rect, kind)
-            if kind in ("start", "end"):
+            if kind in ("start", "end") and size >= 22:
                 p.setPen(FAIL_C)
                 p.drawText(rect.adjusted(3, 0, 0, -2), Qt.AlignLeft | Qt.AlignBottom, "S" if kind == "start" else "E")
             if e.override:
@@ -113,9 +125,11 @@ class LinkMapWidget(QWidget):
                 p.setBrush(Qt.NoBrush)
                 p.drawEllipse(QPointF(rect.right() + 2, rect.top() - 2), 4, 4)
             p.setPen(QColor("#24292f"))
-            p.drawText(QPointF(rect.left(), rect.top() - 4 - fm.height() - fm.descent()), str(i))
-            p.drawText(QPointF(rect.left(), rect.top() - 4 - fm.descent()), self._fmt(e.rel_km))
-            if k:
+            if show_idx[k]:
+                p.drawText(QPointF(rect.left(), rect.top() - 4 - fm.height() - fm.descent()), str(i))
+            if show_dist[k]:
+                p.drawText(QPointF(rect.left(), rect.top() - 4 - fm.descent()), self._fmt(e.rel_km))
+            if k and show_sec[k - 1]:
                 p.drawText(QRectF((xs[k - 1] + x) / 2 - 60, rect.bottom() + 4, 120, fm.height()),
                            Qt.AlignCenter, self._fmt(e.section_km))
             self._hits.append((rect.adjusted(-6, -6, 6, 6), i, e))
