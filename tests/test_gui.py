@@ -33,7 +33,17 @@ def win(qapp, tmp_path, monkeypatch):
     w.load_paths([tmp_path / "data"])
     wait(qapp, lambda: w.project.file_count == 79)
     yield w
+    _dispose(w, qapp)
+
+
+def _dispose(w, qapp):
+    """Κλείνει και καταστρέφει το παράθυρο, ώστε να μη μαζεύονται παράθυρα από τα προηγούμενα tests."""
     w.close()
+    w.setParent(None)
+    w.deleteLater()
+    from PySide6.QtCore import QCoreApplication, QEvent
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    qapp.processEvents()
 
 
 def wait(app, cond, timeout=30):
@@ -243,6 +253,7 @@ def test_linkmap_changes_splice_to_connector(qapp, tmp_path, monkeypatch):
     store2 = overrides.OverrideStore(tmp_path / "ov.json")
     s0 = w._current_sors[0]
     assert store2.get(s0.digest, next(e for e in s0.events if e.role == "event").distance_km) == "connector"
+    _dispose(w, qapp)
     # επαναφορά
     w._change_event_type(splice.distance_km, None)
     assert w.table.item(0, rc).text() == "FAIL"
