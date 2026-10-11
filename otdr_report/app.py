@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pyqtgraph as pg
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from . import __version__
 from .matching import Cable, Fiber, Project, _natural_key, find_sor_files
 from .pdf_report import TEXT, Units, event_headers, event_rows, fiber_verdict, generate_reports
-from .linkmap_widget import LinkMapWidget, asset_dir
+from .linkmap_widget import LinkMapWidget
 from . import overrides
 from .settings import ReportSettings, evaluate, is_dead_fiber, prepare
 from .sor import parse_sor
@@ -617,31 +617,10 @@ class MainWindow(QMainWindow):
         vl = QVBoxLayout(central)
         vl.setContentsMargins(0, 0, 0, 0)
         vl.setSpacing(0)
-        vl.addWidget(self._make_header())
         vl.addWidget(self.main_split, 1)
         self.setCentralWidget(central)
         self._restore_layout()
         self._refresh()
-
-    def _make_header(self) -> QWidget:
-        """Λογότυπο Grandway και όνομα εφαρμογής πάνω-πάνω."""
-        bar = QWidget()
-        bar.setObjectName("header")
-        bar.setStyleSheet("#header { background: white; border-bottom: 3px solid #e9af36; }")
-        hl = QHBoxLayout(bar)
-        hl.setContentsMargins(10, 4, 10, 4)
-        logo_path = asset_dir() / "grandway_logo.png"
-        if logo_path.exists():
-            pm = QPixmap(str(logo_path))
-            if not pm.isNull():
-                lbl = QLabel()
-                lbl.setPixmap(pm.scaledToHeight(40, Qt.SmoothTransformation))
-                hl.addWidget(lbl)
-        title = QLabel(f"{APP_NAME} <span style='color:#767b80'>– έκδοση {__version__}</span>")
-        title.setStyleSheet("font-size: 17px; font-weight: bold; color: #24292f; padding-left: 8px;")
-        hl.addWidget(title)
-        hl.addStretch()
-        return bar
 
     def _restore_layout(self):
         for key, sp in (("splitMain", self.main_split), ("splitLeft", self.left_split),

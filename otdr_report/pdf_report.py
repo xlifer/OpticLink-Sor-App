@@ -102,10 +102,10 @@ MUTED = colors.HexColor("#57606a")
 LAUNCH_C = colors.HexColor("#cf222e")
 
 
-TOP_MARGIN = 22 * mm        # χώρος για το logo πάνω δεξιά
+TOP_MARGIN = 10 * mm
 BOTTOM = 14 * mm
 BOTTOM_SIG = 21 * mm
-LOGO_H = 11 * mm
+LOGO_H = 12 * mm            # Grandway logo πάνω αριστερά, δίπλα στον τίτλο
 
 
 def _register_fonts():
@@ -443,6 +443,7 @@ class ReportBuilder:
         if self.s.company_info:
             right_lines += [_esc(x) for x in self.s.company_info.splitlines()]
         left = [Paragraph(_esc(title), self.st["h1"]), Paragraph(subtitle, self.st["n"])]
+        gw = _grandway_logo()
         meta = []
         if self.s.customer:
             meta.append(f"{t['customer']}: <b>{_esc(self.s.customer)}</b>")
@@ -458,6 +459,12 @@ class ReportBuilder:
             right.append(logo)
         if right_lines:
             right.append(Paragraph("<br/>".join(right_lines), self.st["right"]))
+        if gw:                      # Grandway logo πάνω αριστερά σε κάθε σελίδα, ο τίτλος δεξιά του
+            inner = Table([[gw, left]], colWidths=[gw.drawWidth + 4 * mm, None])
+            inner.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                       ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                       ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+            left = inner
         tbl = Table([[left, right or ""]], colWidths=[None, 62 * mm])
         tbl.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -753,14 +760,8 @@ class ReportBuilder:
         stamp = datetime.now().strftime("%d/%m/%Y %H:%M")
         signatures = self.s.signatures
 
-        logo = asset_dir() / "grandway_logo.png"
-
         def on_page(c, doc):
             c.saveState()
-            if logo.is_file():          # Grandway logo πάνω δεξιά σε κάθε σελίδα
-                w = LOGO_H * 411 / 201
-                c.drawImage(str(logo), A4[0] - 12 * mm - w, A4[1] - 7 * mm - LOGO_H, w, LOGO_H,
-                            mask="auto", preserveAspectRatio=True)
             c.setFont("DejaVu", 6.5)
             c.setFillColor(MUTED)
             c.drawString(12 * mm, 8 * mm, f"{t['generated']}: {stamp}")
@@ -841,6 +842,15 @@ def criteria_text(th, lang: str = "el") -> str:
 
 def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _grandway_logo():
+    p = asset_dir() / "grandway_logo.png"
+    if not p.is_file():
+        return None
+    from reportlab.lib.utils import ImageReader
+    w, h = ImageReader(str(p)).getSize()
+    return Image(str(p), width=LOGO_H * w / float(h or 1), height=LOGO_H)
 
 
 def _val(s: str) -> str:

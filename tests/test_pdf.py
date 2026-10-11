@@ -63,7 +63,7 @@ def test_real_grandway_file_in_report(tmp_path):
     assert evaluate(sor, th) is True   # ανακλάσεις -32 dB δεν μετράνε από προεπιλογή
 
 
-# ---------- 1.2.0: νέα σελίδα PDF ----------
+# ---------- 2.0.0: νέα σελίδα PDF ----------
 def _pages(pdf: Path) -> int:
     import re
     return len(re.findall(rb"/Type /Page[^s]", pdf.read_bytes()))
