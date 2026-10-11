@@ -213,6 +213,7 @@ def check_installed(setup: str, out_dir: str) -> int:
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")        # η κονσόλα των Windows (cp1252) δεν γράφει ελληνικά
     mode = sys.argv[1]
     if mode == "exe":
         sys.exit(check_exe(sys.argv[2:]))
