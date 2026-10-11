@@ -1,4 +1,4 @@
-# Οδηγός ελέγχου – OTDR Batch Report
+# Οδηγός ελέγχου – Grandway Batch Report
 
 Για ανεξάρτητο έλεγχο κώδικα και δοκιμές. Ο ελεγκτής **δεν αλλάζει κώδικα της εφαρμογής**.
 Αναφέρει ευρήματα με: αρχείο:γραμμή, βήματα αναπαραγωγής, αναμενόμενο και πραγματικό
@@ -30,9 +30,11 @@ repository.
 | `otdr_report/settings.py` | `ReportSettings`, `Thresholds`, `prepare()` (εφαρμογή launch), `event_ok()`, `evaluate()` |
 | `otdr_report/pdf_report.py` | PDF: `TraceChart`, `LinkMap`, `event_rows()` (κοινό με την οθόνη), `ReportBuilder`, `generate_reports()` |
 | `otdr_report/app.py` | GUI (PySide6 + pyqtgraph), εργασίες σε QThread, `--selftest` |
+| `otdr_report/overrides.py` | Μόνιμες διορθώσεις χρήστη κόλληση ↔ connector (κλειδί: SHA-1 αρχείου + θέση συμβάντος) |
+| `otdr_report/linkmap_widget.py` | Link map στο παράθυρο (εικονίδια από `otdr_report/assets/icons`) |
 | `otdr_report/synthetic.py` | Γεννήτρια συνθετικών `.sor` (και με launch cable) για δοκιμές |
 | `tests/` | pytest· `tests/data/` περιέχει **πραγματικά** αρχεία του χρήστη (FHO5000, 2026) και ένα δείγμα Grandway του 2012 |
-| `OTDRBatchReport.spec`, `installer/setup.iss` | PyInstaller (onedir) + Inno Setup |
+| `GrandwayBatchReport.spec`, `installer/setup.iss` | PyInstaller (onedir) + Inno Setup |
 | `.github/workflows/build-windows.yml` | CI: pytest (Linux + Windows), PyInstaller, `--selftest` του exe, Inno Setup, artifact |
 
 ## 3. Εκκίνηση
@@ -48,7 +50,7 @@ python -m otdr_report.synthetic data --fibers 300 --launch 100.8   # 600 δοκ�
 Σε Linux χωρίς οθόνη: `QT_QPA_PLATFORM=offscreen`. Χρειάζονται και τα πακέτα `libegl1`,
 `libgl1`, `libxkbcommon0`, `libfontconfig1` και `libdbus-1-3`.
 
-Το exe για Windows: `pyinstaller --noconfirm OTDRBatchReport.spec` και μετά `iscc installer\setup.iss`.
+Το exe για Windows: `pyinstaller --noconfirm GrandwayBatchReport.spec` και μετά `iscc installer\setup.iss`.
 Το CI ανεβάζει το artifact `OTDRBatchReport-Setup-<έκδοση>`.
 
 ## 4. Δοκιμές

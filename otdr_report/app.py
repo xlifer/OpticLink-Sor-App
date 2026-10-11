@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pyqtgraph as pg
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -20,10 +20,14 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from . import __version__
 from .matching import Cable, Fiber, Project, _natural_key, find_sor_files
 from .pdf_report import TEXT, Units, event_headers, event_rows, fiber_verdict, generate_reports
+from .linkmap_widget import LinkMapWidget, asset_dir
+from . import overrides
 from .settings import ReportSettings, evaluate, is_dead_fiber, prepare
 from .sor import parse_sor
 
-APP_NAME = "OTDR Batch Report"
+APP_NAME = "Grandway Batch Report"
+# Σταθερά, για να μη χαθούν οι αποθηκευμένες ρυθμίσεις μετά τη μετονομασία
+SETTINGS_ORG, SETTINGS_APP = "OTDRBatchReport", "OTDR Batch Report"
 WL_QCOLORS = {1310: "#1f6feb", 1550: "#d1242f", 1625: "#8250df", 1490: "#1a7f37", 850: "#bf8700"}
 # Ίδια χρώματα με το PDF, ως συμπαγές φόντο με άσπρα έντονα γράμματα: διαβάζονται
 # το ίδιο καθαρά σε ανοιχτό και σε σκοτεινό θέμα των Windows.
@@ -457,7 +461,7 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon)))
         self.resize(1400, 860)
         self.setAcceptDrops(True)
-        self.qs = QSettings("OTDRBatchReport", APP_NAME)
+        self.qs = QSettings(SETTINGS_ORG, SETTINGS_APP)
         try:
             self.settings = ReportSettings.from_json(self.qs.value("report", "", str) or "{}")
         except Exception:
@@ -469,6 +473,7 @@ class MainWindow(QMainWindow):
         self._filter = "all"                    # all | fail | missing | pass
         self._want_fiber: str | None = None     # μέτρηση που ξαναεπιλέγεται μετά από ανανέωση
         self._sort = (0, Qt.AscendingOrder)
+        self._current_sors: list = []            # μετρήσεις της επιλεγμένης ίνας (για το Link map)
 
         tb = self.addToolBar("main")
         tb.setMovable(False)
@@ -563,43 +568,98 @@ class MainWindow(QMainWindow):
         tl.addWidget(filter_bar)
         tl.addWidget(self.table)
 
-        # Κάτω: γράφημα + συμβάντα
+        # Γράφημα, Link map, συμβάντα
         pg.setConfigOptions(antialias=True, background="w", foreground="#333")
         self.plot = pg.PlotWidget()
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setLabel("bottom", "Απόσταση (km)")
         self.plot.setLabel("left", "dB")
         self.plot.addLegend(offset=(70, 10), labelTextSize="8pt")
+        self.linkmap = LinkMapWidget()
+        self.linkmap.typeChangeRequested.connect(self._change_event_type)
         self.events_tabs = QTabWidget()
+        self.events_tabs.currentChanged.connect(self._sync_linkmap)
 
-        bottom = QSplitter(Qt.Horizontal)
-        bottom.addWidget(self.plot)
-        bottom.addWidget(self.events_tabs)
-        bottom.setStretchFactor(0, 3)
-        bottom.setStretchFactor(1, 2)
-        self.events_tabs.setMinimumWidth(300)
-        bottom.setSizes([850, 550])
+        # Διάταξη: αριστερά γράφημα / Link map / μετρήσεις — δεξιά καλώδια / συμβάντα.
+        # Όλα τα όρια μετακινούνται (πάνω-κάτω, δεξιά-αριστερά) και θυμούνται το μέγεθός τους.
+        self.left_split = QSplitter(Qt.Vertical)
+        self.left_split.addWidget(self.plot)
+        self.left_split.addWidget(self.linkmap)
+        self.left_split.addWidget(table_box)
+        self.left_split.setStretchFactor(0, 5)
+        self.left_split.setStretchFactor(1, 1)
+        self.left_split.setStretchFactor(2, 4)
+        self.left_split.setSizes([430, 120, 330])
 
-        right = QSplitter(Qt.Vertical)
-        right.addWidget(table_box)
-        right.addWidget(bottom)
-        right.setSizes([380, 440])
-
-        main = QSplitter(Qt.Horizontal)
-        left = QWidget()
-        ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
+        cables_box = QWidget()
+        cl = QVBoxLayout(cables_box)
+        cl.setContentsMargins(0, 0, 0, 0)
         hint = QLabel("Σύρε εδώ φάκελο ή αρχεία .sor")
         hint.setStyleSheet("color:#57606a; padding:4px")
-        ll.addWidget(self.tree)
-        ll.addWidget(hint)
-        main.addWidget(left)
-        main.addWidget(right)
-        main.setSizes([380, 1020])
-        self.setCentralWidget(main)
+        cl.addWidget(self.tree)
+        cl.addWidget(hint)
+        self.right_split = QSplitter(Qt.Vertical)
+        self.right_split.addWidget(cables_box)
+        self.right_split.addWidget(self.events_tabs)
+        self.right_split.setSizes([300, 580])
+
+        self.main_split = QSplitter(Qt.Horizontal)
+        self.main_split.addWidget(self.left_split)
+        self.main_split.addWidget(self.right_split)
+        self.main_split.setStretchFactor(0, 3)
+        self.main_split.setStretchFactor(1, 2)
+        self.main_split.setSizes([920, 520])
+        for sp in (self.left_split, self.right_split, self.main_split):
+            sp.setChildrenCollapsible(False)
+            sp.setHandleWidth(6)
+
+        central = QWidget()
+        vl = QVBoxLayout(central)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(0)
+        vl.addWidget(self._make_header())
+        vl.addWidget(self.main_split, 1)
+        self.setCentralWidget(central)
+        self._restore_layout()
         self._refresh()
 
+    def _make_header(self) -> QWidget:
+        """Λογότυπο Grandway και όνομα εφαρμογής πάνω-πάνω."""
+        bar = QWidget()
+        bar.setObjectName("header")
+        bar.setStyleSheet("#header { background: white; border-bottom: 3px solid #e9af36; }")
+        hl = QHBoxLayout(bar)
+        hl.setContentsMargins(10, 4, 10, 4)
+        logo_path = asset_dir() / "grandway_logo.png"
+        if logo_path.exists():
+            pm = QPixmap(str(logo_path))
+            if not pm.isNull():
+                lbl = QLabel()
+                lbl.setPixmap(pm.scaledToHeight(40, Qt.SmoothTransformation))
+                hl.addWidget(lbl)
+        title = QLabel(f"{APP_NAME} <span style='color:#767b80'>– έκδοση {__version__}</span>")
+        title.setStyleSheet("font-size: 17px; font-weight: bold; color: #24292f; padding-left: 8px;")
+        hl.addWidget(title)
+        hl.addStretch()
+        return bar
+
+    def _restore_layout(self):
+        for key, sp in (("splitMain", self.main_split), ("splitLeft", self.left_split),
+                        ("splitRight", self.right_split)):
+            state = self.qs.value(key)
+            if state is not None:
+                try:
+                    sp.restoreState(state)
+                except (TypeError, ValueError):
+                    pass
+
+    def _save_layout(self):
+        self.qs.setValue("splitMain", self.main_split.saveState())
+        self.qs.setValue("splitLeft", self.left_split.saveState())
+        self.qs.setValue("splitRight", self.right_split.saveState())
+
     def closeEvent(self, e):
+        self._save_layout()
         """Αν τρέχει φόρτωση ή PDF, τη σταματάμε και περιμένουμε να τελειώσει πριν κλείσουμε.
 
         Χωρίς αυτό, το νήμα συνέχιζε ενώ το παράθυρο καταστρεφόταν και η εφαρμογή έπεφτε.
@@ -969,6 +1029,9 @@ class MainWindow(QMainWindow):
         return menu
 
     def _show_fiber(self, fiber: Fiber | None):
+        self._current_fiber_shown = fiber
+        self._current_sors = []
+        self.linkmap.set_measurement(None, None)
         self.plot.clear()
         self.plot.setTitle(None)
         while self.events_tabs.count():          # το clear() δεν διαγράφει τις σελίδες: διαρροή μνήμης
@@ -979,7 +1042,7 @@ class MainWindow(QMainWindow):
         if not fiber:
             return
         th = self.settings.thresholds
-        t = TEXT[self.settings.language] if self.settings.language in TEXT else TEXT["el"]
+        t = TEXT["el"]                      # η εφαρμογή είναι στα ελληνικά· η γλώσσα αφορά μόνο το PDF
         sors = []
         for w in fiber.wavelengths:
             m = fiber.measurements[w]
@@ -1042,6 +1105,34 @@ class MainWindow(QMainWindow):
         if sors[0].launch_km:
             title += f'   <span style="color:#cf222e">Launch cable: {sors[0].launch_km * 1000:.1f} m</span>'
         self.plot.setTitle(title, size="9pt")
+        self._current_sors = sors
+        self._units_m = units.m
+        self._sync_linkmap()
+
+    def _sync_linkmap(self, *_):
+        """Το Link map δείχνει το μήκος κύματος της επιλεγμένης καρτέλας συμβάντων."""
+        sors = getattr(self, "_current_sors", [])
+        if not sors:
+            self.linkmap.set_measurement(None, None)
+            return
+        idx = self.events_tabs.currentIndex()
+        sor = sors[idx] if 0 <= idx < len(sors) else sors[0]
+        self.linkmap.set_measurement(sor, self.settings.thresholds, getattr(self, "_units_m", True))
+
+    def _change_event_type(self, distance_km: float, kind):
+        """Διόρθωση κόλληση ↔ connector από το Link map, για όλα τα μήκη κύματος της ίνας."""
+        sors = getattr(self, "_current_sors", [])
+        if not sors:
+            return
+        tab = self.events_tabs.currentIndex()
+        overrides.toggle_event(sors, distance_km, kind)
+        fiber = getattr(self, "_current_fiber_shown", None)
+        self._want_fiber = fiber.display if fiber else None
+        self._refresh()                                 # νέα PASS/FAIL σε πίνακα και λίστα καλωδίων
+        if 0 <= tab < self.events_tabs.count():
+            self.events_tabs.setCurrentIndex(tab)
+        what = {"connector": "Connector", "splice": "Κόλληση", None: "όπως το όργανο"}[kind]
+        self.statusBar().showMessage(f"Το συμβάν ορίστηκε: {what}. Ισχύει και στο PDF.", 8000)
 
     # ---------- ρυθμίσεις & εξαγωγή
     def _save_settings(self):
@@ -1173,12 +1264,16 @@ def main():
     if sys.platform.startswith("win"):
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("OTDRBatchReport.App")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GrandwayBatchReport.App")
         except Exception:
             pass
     app = QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
-    app.setOrganizationName("OTDRBatchReport")
+    app.setApplicationName(SETTINGS_APP)
+    app.setOrganizationName(SETTINGS_ORG)
+    app.setApplicationDisplayName(APP_NAME)
+    from PySide6.QtCore import QStandardPaths
+    data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
+    overrides.use_store(overrides.OverrideStore(data_dir / "event_overrides.json"))
     app.setStyle("Fusion")
     w = MainWindow()
     w.show()

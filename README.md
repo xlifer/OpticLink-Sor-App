@@ -1,4 +1,4 @@
-# OTDR Batch Report
+# Grandway Batch Report
 
 Εφαρμογή για Windows 10/11 που ανοίγει **χιλιάδες** μετρήσεις OTDR (`.sor`),
 αντιστοιχίζει αυτόματα τις μετρήσεις **1310 nm** με τις **1550 nm** της ίδιας ίνας
@@ -70,12 +70,12 @@
 ## Εγκατάσταση
 
 1. Στο GitHub, άνοιξε **Actions → Build Windows installer → την τελευταία επιτυχημένη εκτέλεση**
-   και κατέβασε το `OTDRBatchReport-Setup-x.y.z` από τα *Artifacts*.
+   και κατέβασε το `GrandwayBatchReport-Setup-x.y.z` από τα *Artifacts*.
    Αν έχει γίνει έκδοση με tag `v*`, το Setup βρίσκεται και στα **Releases**.
-2. Τρέξε το `OTDRBatchReport-Setup-x.y.z.exe`. Αν εμφανιστεί το SmartScreen
+2. Τρέξε το `GrandwayBatchReport-Setup-x.y.z.exe`. Αν εμφανιστεί το SmartScreen
    («Τα Windows προστάτευσαν τον υπολογιστή σας»), πάτα **Περισσότερες πληροφορίες → Εκτέλεση
    οπωσδήποτε**. Αυτό συμβαίνει επειδή το πρόγραμμα δεν έχει ψηφιακή υπογραφή.
-3. Το πρόγραμμα εμφανίζεται στο μενού Έναρξη ως **OTDR Batch Report**.
+3. Το πρόγραμμα εμφανίζεται στο μενού Έναρξη ως **Grandway Batch Report**.
 
 ## Χρήση
 
@@ -112,8 +112,8 @@ python -m otdr_report.synthetic out --fibers 300 --launch 100.8   # δοκιμα
 Build σε Windows:
 
 ```bat
-pyinstaller --noconfirm OTDRBatchReport.spec
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=1.1.0 installer\setup.iss
+pyinstaller --noconfirm GrandwayBatchReport.spec
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=1.2.0 installer\setup.iss
 ```
 
 Το workflow `.github/workflows/build-windows.yml` τα κάνει αυτόματα σε κάθε push:

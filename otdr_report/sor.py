@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import struct
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -75,10 +76,20 @@ class Event:
     segment_cum: float | None = None  # αθροιστική απώλεια στο τέλος του τμήματος
     cumulative_loss: float | None = None  # αθροιστική απώλεια μετά το συμβάν (None μέσα στο launch)
     role: str = "event"               # origin | launch | start | event | end
+    # Διόρθωση χρήστη από το Link map: "connector" ή "splice" (None = όπως το έγραψε το όργανο)
+    override: str | None = None
+
+    @property
+    def raw_reflective(self) -> bool:
+        """Όπως το κατέγραψε το όργανο."""
+        return self.code[:1] in ("1", "2")
 
     @property
     def reflective(self) -> bool:
-        return self.code[:1] in ("1", "2")
+        """Connector (ανακλαστικό) ή κόλληση· λαμβάνει υπόψη τη διόρθωση του χρήστη."""
+        if self.override is not None:
+            return self.override == "connector"
+        return self.raw_reflective
 
     @property
     def is_end(self) -> bool:
@@ -123,6 +134,11 @@ class SorFile:
     otdr_model: str = ""
     otdr_sn: str = ""
     software: str = ""
+    test_range_km: float = 0.0     # απόσταση μέτρησης που είχε οριστεί στο όργανο (Distance)
+    test_time_s: int = 0           # χρόνος μέτρησης (averaging time)
+    backscatter_db: float = 0.0    # συντελεστής σκέδασης
+    end_threshold_db: float = 0.0
+    digest: str = ""               # SHA-1 του αρχείου: ταυτότητα για τις διορθώσεις του χρήστη
 
     def __post_init__(self):
         self.apply_launch(0.0)
@@ -294,11 +310,15 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
     spacing = [f.u32() for _ in range(n_pw)]
     [f.u32() for _ in range(n_pw)]
     ior = f.u32() / 100000 or 1.4682
-    f.u16()
+    backscatter = f.i16() / 10                 # π.χ. -795 → -79.5 dB
     averages = f.u32()
-    if v2:
-        f.u16()
+    avg_time = f.u16() if v2 else 0
     acq_range = f.u32()
+    range_dist = f.i32() if v2 else 0          # σε 0,1 km (FHO5000: 20 → 2,0 km)
+    f.i32()                                    # front panel offset
+    f.u16(); f.i16(); f.u16()                  # noise floor, scale, power offset
+    f.u16(); f.u16()                           # κατώφλια απώλειας / ανάκλασης
+    eot = f.u16() / 1000
 
     km_per_tof = 1e-10 * C_KM_PER_S / ior
     resolution = (spacing[0] if spacing else 0) * 1e-14 * C_KM_PER_S / ior
@@ -374,6 +394,11 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
         ior=ior,
         pulse_width_ns=pulses[0] if pulses else 0,
         range_km=acq_range * km_per_tof if acq_range else 0.0,
+        test_range_km=max(0, range_dist) / 10,
+        test_time_s=avg_time,
+        backscatter_db=backscatter,
+        end_threshold_db=eot,
+        digest=hashlib.sha1(data).hexdigest(),
         averages=averages,
         date=date,
         resolution_km=resolution,

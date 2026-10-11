@@ -29,7 +29,8 @@ class Thresholds:
 
 @dataclass
 class ReportSettings:
-    language: str = "el"                 # "el" ή "en"
+    language: str = "en"                 # "en" (προεπιλογή) ή "el"
+    settings_version: int = 2
     company: str = ""
     company_info: str = ""
     logo_path: str = ""
@@ -56,6 +57,10 @@ class ReportSettings:
         th = Thresholds(**{k: v for k, v in data.pop("thresholds", {}).items()
                            if k in Thresholds.__dataclass_fields__})
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        if known.get("settings_version", 1) < 2:
+            # Από την 1.2.0 το PDF βγαίνει στα αγγλικά εκτός αν ο χρήστης διαλέξει ελληνικά.
+            known["language"] = "en"
+            known["settings_version"] = 2
         return cls(thresholds=th, **known)
 
 
@@ -68,8 +73,10 @@ def launch_km_for(sor: SorFile, rs: ReportSettings) -> float:
 
 
 def prepare(sor: SorFile, rs: ReportSettings) -> SorFile:
-    """Εφαρμόζει το launch cable των ρυθμίσεων στη μέτρηση."""
+    """Εφαρμόζει το launch cable των ρυθμίσεων και τις διορθώσεις τύπου του χρήστη."""
+    from . import overrides
     sor.apply_launch(launch_km_for(sor, rs))
+    overrides.STORE.apply(sor)
     return sor
 
 

@@ -208,3 +208,37 @@ def test_switching_fibers_does_not_accumulate_tables(win, qapp):
     for _ in range(5):
         qapp.processEvents()
     assert len(win.events_tabs.findChildren(QTableWidget)) == 2              # μόνο 1310 + 1550 της τρέχουσας
+
+
+def test_linkmap_changes_splice_to_connector(qapp, tmp_path, monkeypatch):
+    """Link map: μια «κόλληση» 0.50 dB (FAIL ως κόλληση) γίνεται connector (≤ 0.75 → PASS), στα δύο λ."""
+    from otdr_report import overrides
+    from otdr_report.synthetic import build_sor
+    monkeypatch.setattr(appmod.QSettings, "value", lambda self, key, default=None, type=None: default)
+    monkeypatch.setattr(appmod.QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(overrides, "STORE", overrides.OverrideStore(tmp_path / "ov.json"))
+    for wl in (1310, 1550):
+        (tmp_path / f"L_SCP1_{wl}_0001.sor").write_bytes(
+            build_sor(wl, 1.0, [(0.4, 0.50, 0)], seed=wl, launch_m=0))
+    w = appmod.MainWindow()
+    w.resize(1200, 800)
+    w.show()
+    w.load_paths([tmp_path])
+    wait(qapp, lambda: w.project.file_count == 2)
+    rc = col(w, "Αποτέλεσμα")
+    assert w.table.item(0, rc).text() == "FAIL"
+    splice = next(e for e in w.linkmap.sor.events if e.role == "event")
+    assert not splice.reflective
+    texts = [a.text() for a in w.linkmap.build_menu(splice).actions()]
+    assert texts[:2] == ["Connector (ανακλαστικό)", "Κόλληση (μη ανακλαστικό)"]
+    w._change_event_type(splice.distance_km, "connector")
+    assert w.table.item(0, rc).text() == "PASS"
+    assert all(next(e for e in s.events if e.role == "event").reflective for s in w._current_sors)
+    # μόνιμο: νέα αποθήκη από το ίδιο αρχείο
+    store2 = overrides.OverrideStore(tmp_path / "ov.json")
+    s0 = w._current_sors[0]
+    assert store2.get(s0.digest, next(e for e in s0.events if e.role == "event").distance_km) == "connector"
+    # επαναφορά
+    w._change_event_type(splice.distance_km, None)
+    assert w.table.item(0, rc).text() == "FAIL"
+    w.close()

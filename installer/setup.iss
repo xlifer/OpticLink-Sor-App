@@ -1,21 +1,22 @@
-; Inno Setup – δημιουργεί το OTDRBatchReport-Setup-<έκδοση>.exe
-; Build: iscc /DAppVersion=1.1.0 installer\setup.iss  (μετά το pyinstaller)
+; Inno Setup – δημιουργεί το GrandwayBatchReport-Setup-<έκδοση>.exe
+; Build: iscc /DAppVersion=1.2.0 installer\setup.iss  (μετά το pyinstaller)
 
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.2.0"
 #endif
 
 [Setup]
 AppId={{6E2C1B7A-3F4D-4B8E-9C11-0A7E5D2F9B31}
-AppName=OTDR Batch Report
+AppName=Grandway Batch Report
 AppVersion={#AppVersion}
-AppPublisher=OTDR Batch Report
-DefaultDirName={autopf}\OTDR Batch Report
-DefaultGroupName=OTDR Batch Report
+AppPublisher=Grandway Batch Report
+DefaultDirName={autopf}\Grandway Batch Report
+DefaultGroupName=Grandway Batch Report
+UsePreviousGroup=no
 OutputDir=..\dist
-OutputBaseFilename=OTDRBatchReport-Setup-{#AppVersion}
+OutputBaseFilename=GrandwayBatchReport-Setup-{#AppVersion}
 SetupIconFile=..\otdr_report\icon.ico
-UninstallDisplayIcon={app}\OTDRBatchReport.exe
+UninstallDisplayIcon={app}\GrandwayBatchReport.exe
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
@@ -31,13 +32,19 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
+[InstallDelete]
+; Μετονομασία από «OTDR Batch Report» (≤ 1.1.0): σβήνονται το παλιό exe και οι παλιές συντομεύσεις
+Type: files; Name: "{app}\OTDRBatchReport.exe"
+Type: files; Name: "{autodesktop}\OTDR Batch Report.lnk"
+Type: filesandordirs; Name: "{autoprograms}\OTDR Batch Report"
+
 [Files]
-Source: "..\dist\OTDRBatchReport\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\GrandwayBatchReport\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\OTDR Batch Report"; Filename: "{app}\OTDRBatchReport.exe"
-Name: "{group}\{cm:UninstallProgram,OTDR Batch Report}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\OTDR Batch Report"; Filename: "{app}\OTDRBatchReport.exe"; Tasks: desktopicon
+Name: "{group}\Grandway Batch Report"; Filename: "{app}\GrandwayBatchReport.exe"
+Name: "{group}\{cm:UninstallProgram,Grandway Batch Report}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\Grandway Batch Report"; Filename: "{app}\GrandwayBatchReport.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\OTDRBatchReport.exe"; Description: "{cm:LaunchProgram,OTDR Batch Report}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\GrandwayBatchReport.exe"; Description: "{cm:LaunchProgram,Grandway Batch Report}"; Flags: nowait postinstall skipifsilent

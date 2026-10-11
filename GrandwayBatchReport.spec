@@ -1,10 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Build:  pyinstaller --noconfirm OTDRBatchReport.spec
+# Build:  pyinstaller --noconfirm GrandwayBatchReport.spec
 from PyInstaller.utils.hooks import collect_submodules
 
 datas = [
     ("otdr_report/fonts", "otdr_report/fonts"),
     ("otdr_report/icon.ico", "otdr_report"),
+    ("otdr_report/assets", "otdr_report/assets"),
 ]
 
 a = Analysis(
@@ -25,7 +26,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="OTDRBatchReport",
+    name="GrandwayBatchReport",
     debug=False,
     strip=False,
     upx=False,
@@ -33,4 +34,4 @@ exe = EXE(
     icon="otdr_report/icon.ico",
     version="installer/version_info.txt",
 )
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="OTDRBatchReport")
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="GrandwayBatchReport")
