@@ -173,7 +173,11 @@ def check_installed(setup: str, out_dir: str) -> int:
             print("FAIL δεν βρέθηκε παράθυρο του προγράμματος")
             return 1
         hwnd, _, title = win
-        print(f"Παράθυρο: «{title}»")
+        sys.path.insert(0, str(ROOT))
+        from otdr_report import __version__
+        want = f"{TITLE} {__version__}"
+        print(f"{'OK  ' if title == want else 'FAIL'} window title: '{title}' (expected '{want}')")
+        bad += title != want
         user32 = ctypes.windll.user32
         user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
                                                wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]

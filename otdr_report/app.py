@@ -1296,7 +1296,6 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(SETTINGS_APP)
     app.setOrganizationName(SETTINGS_ORG)
-    app.setApplicationDisplayName(APP_NAME)
     from PySide6.QtCore import QStandardPaths
     data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
     overrides.use_store(overrides.OverrideStore(data_dir / "event_overrides.json"))
