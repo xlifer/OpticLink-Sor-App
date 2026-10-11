@@ -69,7 +69,7 @@ def _pages(pdf: Path) -> int:
     return len(re.findall(rb"/Type /Page[^s]", pdf.read_bytes()))
 
 
-def test_each_measurement_is_one_page_even_with_many_events(tmp_path):
+def test_many_events_continue_on_next_page(tmp_path):
     import copy
     from otdr_report.matching import Project, find_sor_files
     from otdr_report.pdf_report import ReportBuilder
@@ -96,7 +96,7 @@ def test_each_measurement_is_one_page_even_with_many_events(tmp_path):
         read[f.key] = sors
     out = tmp_path / "x.pdf"
     assert ReportBuilder(s).build(out, [(cable, fibers, read)])
-    assert _pages(out) == len(fibers)
+    assert _pages(out) > len(fibers)                 # χωρίς σμίκρυνση: συνεχίζει σε επόμενη σελίδα
 
 
 def test_english_default_and_new_sections(tmp_path):

@@ -19,7 +19,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (HRFlowable, Flowable, Image, KeepInFrame, PageBreak, Paragraph,
+from reportlab.platypus import (HRFlowable, Flowable, Image, PageBreak, Paragraph,
                                 SimpleDocTemplate, Spacer, Table, TableStyle)
 
 from .linkmap import (asset_dir, icon_path, line_band, linkmap_events, node_kind, node_positions,
@@ -413,7 +413,7 @@ class ReportBuilder:
         self.s = settings
         self.t = TEXT.get(settings.language, TEXT["en"])
         # ύψος περιοχής κειμένου: μία σελίδα ανά μέτρηση
-        self._frame_h = A4[1] - TOP_MARGIN - (BOTTOM_SIG if settings.signatures else BOTTOM) - 1
+        self._frame_h = A4[1] - TOP_MARGIN - (BOTTOM_SIG if settings.signatures else BOTTOM) - 12 - 1   # 12 = padding πλαισίου (6+6 pt)
         self.st = {
             "h1": ParagraphStyle("h1", fontName="DejaVu-Bold", fontSize=13, leading=16, spaceAfter=2),
             "h2": ParagraphStyle("h2", fontName="DejaVu-Bold", fontSize=9.5, leading=12,
@@ -616,7 +616,7 @@ class ReportBuilder:
         return tbl
 
     def fiber_story(self, cable: Cable, fiber: Fiber, sors: dict[int, SorFile]):
-        """Πάντα μία σελίδα ανά μέτρηση: αν δεν χωράει, μικραίνει ολόκληρη η σελίδα."""
+        """Μία σελίδα ανά μέτρηση· με πολλά συμβάντα οι πίνακες συνεχίζουν στην επόμενη (χωρίς σμίκρυνση)."""
         t = self.t
         th = self.s.thresholds
         wls = cable.wavelengths
@@ -722,7 +722,7 @@ class ReportBuilder:
             story.append(TraceChart(present, width, min(55 * mm, max(35 * mm, free)), units, "",
                                     t["launch_cable"]))
         story += tail
-        return [KeepInFrame(width, self._frame_h, story, mode="shrink"), PageBreak()]
+        return story + [PageBreak()]      # αν δεν χωράει (πολλά συμβάντα), οι πίνακες συνεχίζουν σε 2η σελίδα
 
     def _machine_table(self, ref, width: float):
         t = self.t
