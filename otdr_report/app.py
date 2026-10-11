@@ -21,7 +21,7 @@ from . import __version__
 from .matching import Cable, Fiber, Project, _natural_key, find_sor_files
 from .pdf_report import TEXT, Units, event_headers, event_rows, fiber_verdict, generate_reports
 from .linkmap_widget import LinkMapWidget
-from . import overrides
+from . import fiber_info, overrides
 from .settings import ReportSettings, evaluate, is_dead_fiber, prepare
 from .sor import parse_sor
 
@@ -377,6 +377,64 @@ class SettingsDialog(QDialog):
 
 
 # ---------------------------------------------------------------- εξαγωγή
+INFO_HEADS = ["Start Location", "End Location", "Cable ID", "Fiber ID"]
+
+
+class InfoDialog(QDialog):
+    """Start/End Location, Cable ID, Fiber ID μιας μέτρησης, ή μαζικά σε πολλές της ίδιας SCP.
+
+    Μαζικά: εφαρμόζονται μόνο τα πεδία με ✓· τα υπόλοιπα κρατούν την τιμή της κάθε μέτρησης.
+    Όλα τα πεδία είναι κείμενο (το "001" και το "301.1" μένουν όπως γράφονται).
+    """
+
+    def __init__(self, fibers: list[Fiber], parent=None):
+        super().__init__(parent)
+        self.bulk = len(fibers) > 1
+        self.setWindowTitle(f"Στοιχεία {len(fibers)} μετρήσεων" if self.bulk else f"Στοιχεία μέτρησης {fibers[0].display}")
+        self.setMinimumWidth(460)
+        infos = [fiber_info.info_of([m.sor for m in f.measurements.values()]) for f in fibers]
+        self._start = infos[0]
+        lay = QVBoxLayout(self)
+        if self.bulk:
+            note = QLabel("Τσέκαρε τα πεδία που θα γίνουν ίδια σε όλες τις επιλεγμένες μετρήσεις. "
+                          "Τα υπόλοιπα κρατούν την τιμή της κάθε μέτρησης.")
+            note.setWordWrap(True)
+            lay.addWidget(note)
+        form = QFormLayout()
+        self.edits, self.checks = {}, {}
+        labels = {"start_location": "Start Location", "end_location": "End Location",
+                  "cable_id": "Cable ID (και στα δύο άκρα)", "fiber_id": "Fiber ID (και στα δύο άκρα)"}
+        for field in fiber_info.FIELDS:
+            ed = QLineEdit()
+            same = {i[field] for i in infos}
+            if len(same) == 1:
+                ed.setText(next(iter(same)))
+            else:
+                ed.setPlaceholderText("διαφορετικές τιμές")
+            row = QHBoxLayout()
+            if self.bulk:
+                chk = QCheckBox()
+                chk.setToolTip("Εφαρμογή σε όλες τις επιλεγμένες")
+                ed.textEdited.connect(lambda _t, c=chk: c.setChecked(True))
+                row.addWidget(chk)
+                self.checks[field] = chk
+            row.addWidget(ed)
+            form.addRow(labels[field], row)
+            self.edits[field] = ed
+        lay.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Εφαρμογή")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def values(self) -> dict[str, str]:
+        """Τα πεδία που αλλάζουν. Μία μέτρηση: όσα άλλαξαν. Μαζικά: όσα έχουν ✓."""
+        if self.bulk:
+            return {f: self.edits[f].text().strip() for f, c in self.checks.items() if c.isChecked()}
+        return {f: ed.text().strip() for f, ed in self.edits.items() if ed.text().strip() != self._start[f]}
+
+
 class ExportDialog(QDialog):
     def __init__(self, project: Project, s: ReportSettings, out_dir: str, checked: list[str], parent=None):
         super().__init__(parent)
@@ -840,7 +898,7 @@ class MainWindow(QMainWindow):
         heads = ["Μέτρηση", "Αποτέλεσμα"]
         for w in wls:
             heads += [f"{w} Μήκος ({units.name})", f"{w} Απώλεια (dB)", f"{w} dB/km", f"{w}"]
-        heads += ["Αρχεία"]
+        heads += INFO_HEADS + ["Αρχεία"]
         self.table.setColumnCount(len(heads))
         self.table.setHorizontalHeaderLabels(heads)
         fibers = cable.sorted_fibers()
@@ -890,6 +948,17 @@ class MainWindow(QMainWindow):
                             paint_verdict(x, ok)
                         self.table.setItem(r, col + k, x)
                 col += 4
+            sors = [m.sor for m in f.measurements.values()]
+            info = fiber_info.info_of(sors)
+            edited = set().union(*(fiber_info.STORE.edited(x) for x in sors)) if sors else set()
+            for k, field in enumerate(fiber_info.FIELDS):
+                x = SortItem(info[field], _natural_key(info[field]))
+                x.setTextAlignment(Qt.AlignCenter)
+                if field in edited:            # διόρθωση του χρήστη (όχι η τιμή του .sor)
+                    fnt = x.font(); fnt.setItalic(True); fnt.setBold(True); x.setFont(fnt)
+                    x.setToolTip("Διόρθωση χρήστη (το .sor δεν αλλάζει)")
+                self.table.setItem(r, col + k, x)
+            col += len(fiber_info.FIELDS)
             names = ", ".join(m.path.name for m in f.measurements.values())
             if f.duplicates:
                 names += f"   (+{len(f.duplicates)} διπλότυπα)"
@@ -1013,6 +1082,15 @@ class MainWindow(QMainWindow):
             else:
                 menu.addAction(f"Αφαίρεση {len(fibers)} μετρήσεων", self._remove_selected)
             menu.addSeparator()
+            if len(fibers) == 1:
+                menu.addAction("Στοιχεία μέτρησης (Location / Cable ID / Fiber ID)…",
+                               lambda: self._edit_info(fibers))
+            else:
+                menu.addAction(f"Μαζική αλλαγή στοιχείων σε {len(fibers)} μετρήσεις…",
+                               lambda: self._edit_info(fibers))
+            if any(fiber_info.STORE.edited(m.sor) for f in fibers for m in f.measurements.values()):
+                menu.addAction("Επαναφορά στοιχείων από τα .sor", lambda: self._reset_info(fibers))
+            menu.addSeparator()
         start = str(fibers[0].paths[0].parent) if fibers and fibers[0].paths else None
         menu.addAction("Προσθήκη αρχείων .sor…", lambda: self.add_files(start))
         if self._removed:
@@ -1022,6 +1100,31 @@ class MainWindow(QMainWindow):
             for p in fibers[0].paths:
                 menu.addAction(f"Άνοιγμα θέσης: {p.name}", lambda p=p: reveal_file(p))
         return menu
+
+    # ---------- στοιχεία μέτρησης (Start/End Location, Cable ID, Fiber ID)
+    def _edit_info(self, fibers: list[Fiber]):
+        dlg = InfoDialog(fibers, self)
+        if dlg.exec():
+            self.apply_info(fibers, dlg.values())
+
+    def apply_info(self, fibers: list[Fiber], values: dict[str, str]):
+        """Ορίζει τα πεδία του `values` σε κάθε μέτρηση (και στα δύο λ)· τα υπόλοιπα μένουν ίδια."""
+        if not values:
+            return
+        for f in fibers:
+            fiber_info.set_info([m.sor for m in f.measurements.values()], values)
+        self._after_info_change(f"Στοιχεία ενημερώθηκαν σε {len(fibers)} μετρήσεις. Ισχύουν και στο PDF.")
+
+    def _reset_info(self, fibers: list[Fiber]):
+        for f in fibers:
+            fiber_info.STORE.clear([m.sor.digest for m in f.measurements.values()])
+        self._after_info_change("Τα στοιχεία επανήλθαν στις τιμές των .sor.")
+
+    def _after_info_change(self, msg: str):
+        cur = self._current_fiber()
+        self._want_fiber = cur.display if cur else None
+        self._refresh()
+        self.statusBar().showMessage(msg, 8000)
 
     def _tree_menu(self, pos):
         self._build_tree_menu(pos).exec(self.tree.viewport().mapToGlobal(pos))
@@ -1299,6 +1402,7 @@ def main():
     from PySide6.QtCore import QStandardPaths
     data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
     overrides.use_store(overrides.OverrideStore(data_dir / "event_overrides.json"))
+    fiber_info.use_store(fiber_info.InfoStore(data_dir / "fiber_info.json"))
     app.setStyle("Fusion")
     app.setWindowIcon(app_icon())               # εικονίδιο στη γραμμή εργασιών των Windows
     w = MainWindow()

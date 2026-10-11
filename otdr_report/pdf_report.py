@@ -106,7 +106,7 @@ LAUNCH_C = colors.HexColor("#cf222e")
 
 
 TOP_MARGIN = 10 * mm
-CONT_HEADER = 14 * mm       # χώρος για την ταυτότητα της μέτρησης στις σελίδες συνέχειας
+CONT_LOGO_H = 8 * mm        # logo στις σελίδες συνέχειας
 BOTTOM = 14 * mm
 BOTTOM_SIG = 21 * mm
 LOGO_H = 12 * mm            # Grandway logo πάνω αριστερά, δίπλα στον τίτλο
@@ -434,13 +434,13 @@ class _CancellableDoc(BaseDocTemplate):
     συνέχειας, με δεσμευμένο χώρο πάνω για την ταυτότητα της μέτρησης.
     """
 
-    def __init__(self, *args, keep_going=None, on_page=None, on_cont=None, **kw):
+    def __init__(self, *args, keep_going=None, on_page=None, on_cont=None, cont_header=14 * mm, **kw):
         super().__init__(*args, **kw)
         self._keep_going = keep_going
         self._count = 0
         w = self.width
         main = Frame(self.leftMargin, self.bottomMargin, w, self.height, id="main")
-        cont = Frame(self.leftMargin, self.bottomMargin, w, self.height - CONT_HEADER, id="cont")
+        cont = Frame(self.leftMargin, self.bottomMargin, w, self.height - cont_header, id="cont")
         self.addPageTemplates([PageTemplate("main", [main], onPage=on_page),
                                PageTemplate("cont", [cont], onPage=on_cont)])
 
@@ -456,6 +456,7 @@ class ReportBuilder:
         self.s = settings
         self.t = TEXT.get(settings.language, TEXT["en"])
         self._running = {"text": ""}     # ταυτότητα τρέχουσας μέτρησης για τις σελίδες συνέχειας
+        self._running_all: list[str] = []      # όλες, για να δεσμευτεί αρκετό ύψος (μεγάλα ονόματα)
         # ύψος περιοχής κειμένου: μία σελίδα ανά μέτρηση
         self._frame_h = A4[1] - TOP_MARGIN - (BOTTOM_SIG if settings.signatures else BOTTOM) - 12 - 1   # 12 = padding πλαισίου (6+6 pt)
         self.st = {
@@ -584,7 +585,9 @@ class ReportBuilder:
         th = self.s.thresholds
         wls = cable.wavelengths
         units = Units(max((s.length_km for f in fibers for s in read[f.key].values()), default=0))
-        story = [_Running(self._running, f"{t['summary']}: {cable.name}"), NextPageTemplate("cont"),
+        running = f"{t['summary']}: <b>{_esc(cable.name)}</b>"
+        self._running_all.append(running)
+        story = [_Running(self._running, running), NextPageTemplate("cont"),
                  self._header(t["title"], f"{t['summary']}: <b>{_esc(cable.name)}</b>"), Spacer(1, 4 * mm)]
         info = f"{t['cable']}: <b>{_esc(cable.name)}</b> &nbsp; · &nbsp; {t['fibers']}: <b>{len(fibers)}</b>"
         info += " &nbsp; · &nbsp; λ: <b>" + ", ".join(f"{w} nm" for w in wls) + "</b>"
@@ -680,7 +683,9 @@ class ReportBuilder:
         units = Units(max((s.length_km for s in present), default=0))
         width = A4[0] - 24 * mm
         subtitle = f"{t['cable']}: {_esc(cable.name)} &nbsp; · &nbsp; {t['fiber']}: <b>{_esc(fiber.display)}</b>"
-        running = f"{t['cable']}: {cable.name}  ·  {t['fiber']}: {fiber.display}"
+        # σε δύο γραμμές με αναδίπλωση: ολόκληρη η ταυτότητα (π.χ. το _0001) μένει πάντα μέσα στη σελίδα
+        running = f"{t['cable']}: <b>{_esc(cable.name)}</b><br/>{t['fiber']}: <b>{_esc(fiber.display)}</b>"
+        self._running_all.append(running)
         story = [_Running(self._running, running), NextPageTemplate("cont"),
                  self._header(t["title"], subtitle, fiber_verdict(fiber, cable.required, th, sors)),
                  Spacer(1, 2 * mm)]
@@ -819,6 +824,7 @@ class ReportBuilder:
               keep_going: Callable[[], bool] | None = None) -> bool:
         """parts: (καλώδιο, μετρήσεις, read) όπου read[fiber.key] = {λ: SorFile διαβασμένο τώρα}."""
         story = []
+        self._running_all = []          # ο ίδιος builder φτιάχνει πολλά PDF
         for cable, fibers, read in parts:
             if self.s.summary_page:
                 story += self.summary_story(cable, fibers, read)
@@ -834,27 +840,34 @@ class ReportBuilder:
         signatures = self.s.signatures
 
         running = self._running
+        logo = asset_dir() / "grandway_logo.png"
+        lw = CONT_LOGO_H * 411 / 201 if logo.is_file() else 0
+        label = f"({t['continued']})"
+        label_w = pdfmetrics.stringWidth(label, "DejaVu", 7)
+        text_x = 12 * mm + lw + 4 * mm
+        text_w = A4[0] - 12 * mm - text_x - label_w - 4 * mm   # η «συνέχεια» έχει δική της στήλη δεξιά
+        cont_style = ParagraphStyle("cont", fontName="DejaVu", fontSize=8.5, leading=10.5)
+        text_h = max((Paragraph(h, cont_style).wrap(text_w, A4[1])[1] for h in self._running_all), default=0)
+        head_h = max(CONT_LOGO_H, text_h)
+        cont_header = head_h + 5 * mm                           # + γραμμή και κενό πριν από τον πίνακα
 
         def on_cont(c, doc):
             """Σελίδα συνέχειας: logo, ταυτότητα μέτρησης και «συνέχεια» πάνω, μετά το κανονικό υποσέλιδο."""
             on_page(c, doc)
             c.saveState()
             top = A4[1] - TOP_MARGIN
-            logo = asset_dir() / "grandway_logo.png"
-            lw = 0
-            if logo.is_file():
-                lh = 8 * mm
-                lw = lh * 411 / 201
-                c.drawImage(str(logo), 12 * mm, top - lh, lw, lh, mask="auto", preserveAspectRatio=True)
-            c.setFont("DejaVu-Bold", 9)
-            c.setFillColor(colors.black)
-            c.drawString(12 * mm + lw + 4 * mm, top - 5 * mm, running["text"])
+            if lw:
+                c.drawImage(str(logo), 12 * mm, top - CONT_LOGO_H, lw, CONT_LOGO_H, mask="auto",
+                            preserveAspectRatio=True)
+            par = Paragraph(running["text"], cont_style)
+            _, ph = par.wrap(text_w, A4[1])
+            par.drawOn(c, text_x, top - ph)
             c.setFont("DejaVu", 7)
             c.setFillColor(MUTED)
-            c.drawRightString(A4[0] - 12 * mm, top - 5 * mm, f"({t['continued']})")
+            c.drawRightString(A4[0] - 12 * mm, top - 7, label)
             c.setStrokeColor(GOLD)
             c.setLineWidth(1)
-            c.line(12 * mm, top - 10 * mm, A4[0] - 12 * mm, top - 10 * mm)
+            c.line(12 * mm, top - head_h - 2 * mm, A4[0] - 12 * mm, top - head_h - 2 * mm)
             c.restoreState()
 
         def on_page(c, doc):
@@ -877,7 +890,7 @@ class ReportBuilder:
                               topMargin=TOP_MARGIN, bottomMargin=BOTTOM_SIG if signatures else BOTTOM,
                               title=f"{t['title']} – " + ", ".join(p[0].name for p in parts),
                               author=self.s.company or "", keep_going=keep_going,
-                              on_page=on_page, on_cont=on_cont)
+                              on_page=on_page, on_cont=on_cont, cont_header=cont_header)
         try:
             doc.build(story)
         except _Cancelled:

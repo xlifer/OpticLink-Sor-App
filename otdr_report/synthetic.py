@@ -19,7 +19,8 @@ def _s(text: str) -> bytes:
 
 def build_sor(wavelength: int, length_km: float, events: list[tuple[float, float, float]],
               ior: float = 1.4682, seed: int = 0, cable: str = "", fiber: str = "",
-              launch_m: float = 0.0, after_end: tuple = ()) -> bytes:
+              launch_m: float = 0.0, after_end: tuple = (),
+              loc_a: str = "A", loc_b: str = "B") -> bytes:
     """events: (km, loss dB, reflectance dB ή 0 για μη ανακλαστικό).
 
     Με launch_m > 0 προστίθεται launch cable όπως στο FHO5000: connector στο τέλος του
@@ -53,7 +54,7 @@ def build_sor(wavelength: int, length_km: float, events: list[tuple[float, float
 
     user_offset = int(launch_m / 1000 / km_per_tof) if launch_m else 0
     gen = b"GenParams\0" + b"EN" + _s(cable) + _s(fiber) + struct.pack("<HH", 652, wavelength)
-    gen += _s("A") + _s("B") + _s("") + b"BC" + struct.pack("<ii", user_offset, int(launch_m * 10))
+    gen += _s(loc_a) + _s(loc_b) + _s("") + b"BC" + struct.pack("<ii", user_offset, int(launch_m * 10))
     gen += _s("tester") + _s("")
     sup = b"SupParams\0" + b"".join(_s(x) for x in ("Grandway", "FHO5000", "SN123", "", "", "2.2.8", ""))
     fxd = b"FxdParams\0" + struct.pack("<I", int(time.time())) + b"km" + struct.pack("<H", wavelength * 10)

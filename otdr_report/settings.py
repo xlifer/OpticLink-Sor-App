@@ -73,10 +73,11 @@ def launch_km_for(sor: SorFile, rs: ReportSettings) -> float:
 
 
 def prepare(sor: SorFile, rs: ReportSettings) -> SorFile:
-    """Εφαρμόζει το launch cable των ρυθμίσεων και τις διορθώσεις τύπου του χρήστη."""
-    from . import overrides
+    """Εφαρμόζει το launch cable των ρυθμίσεων και τις διορθώσεις του χρήστη (τύπος συμβάντος, στοιχεία μέτρησης)."""
+    from . import fiber_info, overrides
     sor.apply_launch(launch_km_for(sor, rs))
     overrides.STORE.apply(sor)
+    fiber_info.STORE.apply(sor)          # Start/End Location, Cable ID, Fiber ID του χρήστη
     return sor
 
 

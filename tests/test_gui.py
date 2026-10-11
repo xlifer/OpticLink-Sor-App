@@ -283,3 +283,36 @@ def test_app_and_window_icon_from_program_icon(qapp, monkeypatch):
     w = appmod.MainWindow()
     assert sorted(s.width() for s in w.windowIcon().availableSizes()) == [16, 32, 48, 256]
     _dispose(w, qapp)
+
+
+def test_info_dialog_single_and_bulk(qapp, tmp_path, monkeypatch):
+    from otdr_report import fiber_info
+    monkeypatch.setattr(appmod.QSettings, "value", lambda self, key, default=None, type=None: default)
+    monkeypatch.setattr(appmod.QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(fiber_info, "STORE", fiber_info.InfoStore(tmp_path / "fi.json"))
+    make_cable(tmp_path / "d", "I_SCP1", 3)
+    w = appmod.MainWindow()
+    w.show()
+    w.load_paths([tmp_path / "d"])
+    wait(qapp, lambda: w.project.file_count == 6)
+    fibers = w.current_cable.sorted_fibers()
+    # μία μέτρηση: αλλάζουν μόνο τα πεδία που άλλαξε ο χρήστης
+    dlg = appmod.InfoDialog([fibers[0]], w)
+    dlg.edits["fiber_id"].setText("001")
+    dlg.edits["cable_id"].setText("105.3")
+    assert dlg.values() == {"fiber_id": "001", "cable_id": "105.3"}
+    w.apply_info([fibers[0]], dlg.values())
+    # μαζικά: μόνο τα τσεκαρισμένα πεδία
+    dlg = appmod.InfoDialog(fibers, w)
+    dlg.edits["start_location"].setText("FARM1.R01_SCP31")
+    dlg.edits["start_location"].textEdited.emit("FARM1.R01_SCP31")
+    assert dlg.values() == {"start_location": "FARM1.R01_SCP31"}
+    w.apply_info(fibers, dlg.values())
+    c = col(w, "Fiber ID")
+    ids = {w.table.item(r, 0).text(): w.table.item(r, c).text() for r in range(w.table.rowCount())}
+    assert ids["I_SCP1_0001"] == "001" and ids["I_SCP1_0002"] == "0002"       # τα υπόλοιπα κράτησαν το δικό τους
+    s0 = col(w, "Start Location")
+    assert {w.table.item(r, s0).text() for r in range(w.table.rowCount())} == {"FARM1.R01_SCP31"}
+    menu = [a.text() for a in w._build_table_menu(w.table.visualItemRect(w.table.item(0, 0)).center()).actions()]
+    assert any(t.startswith("Στοιχεία μέτρησης") for t in menu)
+    _dispose(w, qapp)
