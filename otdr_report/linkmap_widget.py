@@ -6,7 +6,7 @@ from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSizePolicy, QToolTip, QWidget
 
 from .linkmap import (KINDS, STATES, asset_dir, icon_path, linkmap_events,  # noqa: F401
-                      node_kind, node_positions, node_state, scale_positions)
+                      line_band, node_kind, node_positions, node_state, scale_positions)
 from .sor import Event, SorFile
 
 PASS_C, FAIL_C, GREY_C = QColor("#1a7f37"), QColor("#cf222e"), QColor("#8c959f")
@@ -24,6 +24,7 @@ def load_icon(name: str) -> QPixmap | None:
 class LinkMapWidget(QWidget):
     """Σχηματική ζεύξη. Κλικ σε ενδιάμεσο συμβάν → αλλαγή τύπου (connector / κόλληση)."""
 
+    refreshRequested = Signal()                     # δεξί κλικ → «Ανανέωση μέτρησης»
     typeChangeRequested = Signal(float, object)     # (απόσταση συμβάντος km από το OTDR, "connector"/"splice"/None)
 
     def __init__(self, parent=None):
@@ -49,6 +50,7 @@ class LinkMapWidget(QWidget):
     def paintEvent(self, _ev):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.fillRect(self.rect(), QColor("white"))
         self._hits = []
         if not self.sor:
@@ -85,8 +87,9 @@ class LinkMapWidget(QWidget):
         y = top + size / 2
         xs = node_positions(kms, 14 + size / 2, w - 14 - size / 2, size + 24)
         if self._line and len(xs) > 1:
-            # το line.png έχει το ίδιο ύψος με τα εικονίδια: ίδιο πάχος καλωδίου
-            p.drawPixmap(QRectF(xs[0], y - size / 2, xs[-1] - xs[0], size).toRect(), self._line)
+            off, lh = line_band(size)              # ίδια ευθεία και πάχος με το καλώδιο των εικονιδίων
+            p.drawPixmap(QRectF(xs[0], y - size / 2 + off, xs[-1] - xs[0], lh), self._line,
+                         QRectF(self._line.rect()))
         else:
             p.setPen(QPen(QColor("#767b80"), 3))
             p.drawLine(QPointF(xs[0], y), QPointF(xs[-1], y))
@@ -95,7 +98,7 @@ class LinkMapWidget(QWidget):
             kind = node_kind(e)
             icon = self._icons.get(f"{kind}_{state}")
             if icon:
-                p.drawPixmap(rect.toRect(), icon)
+                p.drawPixmap(rect, icon, QRectF(icon.rect()))
             else:
                 border = {"pass": PASS_C, "fail": FAIL_C}.get(state, GREY_C)
                 p.setPen(QPen(border, 2.5))
@@ -143,34 +146,32 @@ class LinkMapWidget(QWidget):
     def mouseMoveEvent(self, ev):
         hit = self._hit(ev.position())
         if hit and hit[1].role == "event":
-            self.setCursor(Qt.PointingHandCursor)
             e = hit[1]
             kind = "Connector" if e.reflective else "Κόλληση"
             extra = " (διορθωμένο)" if e.override else ""
             QToolTip.showText(ev.globalPosition().toPoint(),
                               f"{kind}{extra} – {self._fmt(e.rel_km)} · απώλεια {e.splice_loss:.3f} dB\n"
-                              "Κλικ για αλλαγή τύπου", self)
-        else:
-            self.unsetCursor()
+                              "Δεξί κλικ για αλλαγή τύπου", self)
 
-    def mousePressEvent(self, ev):
-        hit = self._hit(ev.position())
-        if not hit or hit[1].role != "event":
-            return
-        menu = self.build_menu(hit[1])
-        menu.exec(ev.globalPosition().toPoint())
+    def contextMenuEvent(self, ev):
+        """Δεξί κλικ: αλλαγή τύπου (πάνω σε ενδιάμεσο συμβάν) και «Ανανέωση μέτρησης»."""
+        hit = self._hit(QPointF(ev.pos()))
+        menu = self.build_menu(hit[1] if hit and hit[1].role == "event" else None)
+        menu.exec(ev.globalPos())
 
-    def build_menu(self, e: Event) -> QMenu:
+    def build_menu(self, e: Event | None) -> QMenu:
         menu = QMenu(self)
-        a_con = QAction("Connector (ανακλαστικό)", menu, checkable=True, checked=e.reflective)
-        a_spl = QAction("Κόλληση (μη ανακλαστικό)", menu, checkable=True, checked=not e.reflective)
-        a_con.triggered.connect(lambda: self.typeChangeRequested.emit(e.distance_km, "connector"))
-        a_spl.triggered.connect(lambda: self.typeChangeRequested.emit(e.distance_km, "splice"))
-        menu.addAction(a_con)
-        menu.addAction(a_spl)
-        if e.override:
+        if e is not None:
+            a_con = QAction("Connector (ανακλαστικό)", menu, checkable=True, checked=e.reflective)
+            a_spl = QAction("Κόλληση (μη ανακλαστικό)", menu, checkable=True, checked=not e.reflective)
+            a_con.triggered.connect(lambda: self.typeChangeRequested.emit(e.distance_km, "connector"))
+            a_spl.triggered.connect(lambda: self.typeChangeRequested.emit(e.distance_km, "splice"))
+            menu.addAction(a_con)
+            menu.addAction(a_spl)
+            if e.override:
+                natural = "Connector" if e.raw_reflective else "Κόλληση"
+                menu.addAction(f"Επαναφορά όπως το όργανο ({natural})",
+                               lambda: self.typeChangeRequested.emit(e.distance_km, None))
             menu.addSeparator()
-            natural = "Connector" if e.raw_reflective else "Κόλληση"
-            menu.addAction(f"Επαναφορά όπως το όργανο ({natural})",
-                           lambda: self.typeChangeRequested.emit(e.distance_km, None))
+        menu.addAction("Ανανέωση μέτρησης", self.refreshRequested.emit)
         return menu

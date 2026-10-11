@@ -244,3 +244,13 @@ def test_long_names_wrap_in_summary(tmp_path):
     assert len(table._cellvalues) == 3                                       # επικεφαλίδα + 2 μετρήσεις
     assert isinstance(table._cellvalues[1][0], Paragraph)                    # όχι απλό κείμενο που ξεχειλίζει
     assert generate_reports([(c, c.sorted_fibers())], tmp_path / "out", ReportSettings())
+
+
+# ---------- 2.0.0: τίποτα μετά το (E) ----------
+def test_events_after_end_are_ignored(tmp_path):
+    from otdr_report.synthetic import build_sor
+    data = build_sor(1310, 0.3187, [(0.1555, 0.25, 0)], after_end=((0.3407, 0.0), (0.36, 0.4)))
+    s = parse_sor_bytes(data)
+    assert s.events[-1].is_end and abs(s.events[-1].distance_km - 0.3187) < 0.001
+    assert len(s.events) == 3                       # (S), κόλληση, (E)
+    assert evaluate(s, ReportSettings().thresholds) is True     # η «απώλεια» 0.4 μετά το τέλος δεν μετράει

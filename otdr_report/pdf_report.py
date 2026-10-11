@@ -22,8 +22,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (HRFlowable, Flowable, Image, KeepInFrame, PageBreak, Paragraph,
                                 SimpleDocTemplate, Spacer, Table, TableStyle)
 
-from .linkmap import (asset_dir, icon_path, linkmap_events, node_kind, node_positions, node_state,
-                      scale_positions)
+from .linkmap import (asset_dir, icon_path, line_band, linkmap_events, node_kind, node_positions,
+                      node_state, scale_positions)
 from .matching import Cable, Fiber
 from .settings import ReportSettings, evaluate, event_ok, is_dead_fiber, prepare
 from .sor import SorError, SorFile, downsample, parse_sor
@@ -182,7 +182,7 @@ class TraceChart(Flowable):
         ymax = float(np.max(ys)) + 1.5
         if ymax - ymin < 5:
             ymin = max(0.0, ymax - 5)
-        ymax += (ymax - ymin) * 0.15  # χώρος για το launch cable
+        ymax += (ymax - ymin) * 0.10  # χώρος για τους αριθμούς των συμβάντων
 
         def tx(v): return left + (v - xmin) / (xmax - xmin) * pw
         def ty(v): return bottom + (v - ymin) / (ymax - ymin) * ph
@@ -250,23 +250,7 @@ class TraceChart(Flowable):
                 c.line(X, bottom + ph - 9, X, bottom + ph)
                 c.setFillColor(colors.HexColor("#24292f"))
                 c.drawCentredString(X, bottom + ph - 15, str(i))
-        # Launch cable πάνω δεξιά (χωρίς ονόματα αρχείων/καλωδίων μέσα στο γράφημα)
-        labels = []
-        if sors and sors[0].launch_km:
-            labels.append((f"{self.launch_label}: {sors[0].launch_km * 1000:.1f} m", "DejaVu-Bold", 7, LAUNCH_C))
-        if labels:
-            box_w = max(c.stringWidth(txt, f, fs) for txt, f, fs, _ in labels) + 6
-            box_h = 8.5 * len(labels) + 3
-            c.setFillColor(colors.white)
-            c.setStrokeColor(GRID_C)
-            c.setLineWidth(0.3)
-            c.rect(left + pw - 2 - box_w, bottom + ph - 18 - box_h, box_w, box_h, fill=1, stroke=1)
-            ly = bottom + ph - 18 - 8.5
-            for txt, f, fs, col in labels:
-                c.setFont(f, fs)
-                c.setFillColor(col)
-                c.drawRightString(left + pw - 5, ly, txt)
-                ly -= 8.5
+        # Μέσα στο γράφημα δεν γράφονται ονόματα αρχείων ούτε το launch cable
 
         # Υπόμνημα
         c.setFont("DejaVu-Bold", 7)
@@ -334,8 +318,8 @@ class LinkMap(Flowable):
         xs = node_positions(kms, 4 * mm + size / 2, self.width - 4 * mm - size / 2, size + 6 * mm)
         line = icon_path("line")
         if line and len(xs) > 1:
-            # το line.png έχει το ίδιο ύψος με τα εικονίδια: ίδιο πάχος καλωδίου
-            c.drawImage(str(line), xs[0], y - size / 2, xs[-1] - xs[0], size, mask="auto")
+            off, lh = line_band(size)              # ίδια ευθεία και πάχος με το καλώδιο των εικονιδίων
+            c.drawImage(str(line), xs[0], y + size / 2 - off - lh, xs[-1] - xs[0], lh, mask="auto")
         else:
             c.setStrokeColor(STEEL); c.setLineWidth(1.6)
             c.line(xs[0], y, xs[-1], y)
@@ -704,11 +688,6 @@ class ReportBuilder:
                 story.append(Paragraph(f'<font color="{FAIL_C.hexval()}"><b>{_esc(t["dead"].format(wl=s.wavelength))}</b></font>',
                                        self.st["n"]))
 
-        # 5. Συμβάντα ανά μήκος κύματος
-        for s in present:
-            story.append(self._section(f"{t['events']} – {s.wavelength} nm"))
-            story.append(self._events_table(s, units))
-
         # 6. Link map (χωρίς launch cable, από το (S) στο 0)
         if present:
             story.append(self._section(t["link_map"]))
@@ -720,7 +699,13 @@ class ReportBuilder:
         crit = criteria_text(th, self.s.language)
         if crit:
             foot.append(f"{t['criteria']}: {_esc(crit)}")
-        tail = [Spacer(1, 1.5 * mm), Paragraph(" &nbsp; · &nbsp; ".join(foot), self.st["small"])] if foot else []
+        tail = []
+        # Συμβάντα ανά μήκος κύματος, κάτω-κάτω στη σελίδα
+        for s in present:
+            tail.append(self._section(f"{t['events']} – {s.wavelength} nm"))
+            tail.append(self._events_table(s, units))
+        if foot:
+            tail += [Spacer(1, 1.5 * mm), Paragraph(" &nbsp; · &nbsp; ".join(foot), self.st["small"])]
 
         # 7. Γράφημα (με launch cable, χωρίς ονόματα αρχείων): παίρνει όσο χώρο περισσεύει
         #    στη σελίδα, ώστε η μέτρηση να χωράει πάντα σε μία σελίδα.

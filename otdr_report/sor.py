@@ -362,6 +362,12 @@ def parse_sor_bytes(data: bytes, path: Path | None = None, with_trace: bool = Tr
         if k.p > k_end or k_end - k.p >= min_event:
             raise SorError("Κατεστραμμένο αρχείο: το πλήθος συμβάντων δεν ταιριάζει με το μέγεθος του τμήματος")
 
+    # Το (E) είναι το τέλος της ίνας. Ό,τι γράφει το όργανο μετά από αυτό (θόρυβος μετά το τέλος)
+    # δεν είναι συμβάν της ζεύξης: δεν εμφανίζεται και δεν κρίνεται.
+    end_idx = next((i for i, e in enumerate(events) if i and e.is_end), None)
+    if end_idx is not None:
+        events = events[:end_idx + 1]
+
     if not length:
         ends = [e for e in events if e.is_end]
         length = ends[0].distance_km if ends else (events[-1].distance_km if events else 0.0)

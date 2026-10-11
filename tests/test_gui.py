@@ -231,6 +231,11 @@ def test_linkmap_changes_splice_to_connector(qapp, tmp_path, monkeypatch):
     assert not splice.reflective
     texts = [a.text() for a in w.linkmap.build_menu(splice).actions()]
     assert texts[:2] == ["Connector (ανακλαστικό)", "Κόλληση (μη ανακλαστικό)"]
+    assert texts[-1] == "Ανανέωση μέτρησης"                                  # δεξί κλικ
+    assert [a.text() for a in w.linkmap.build_menu(None).actions()] == ["Ανανέωση μέτρησης"]
+    w.linkmap.set_measurement(None, None)
+    w.linkmap.refreshRequested.emit()
+    assert w.linkmap.sor is not None                                         # ξαναπήρε την επιλεγμένη
     w._change_event_type(splice.distance_km, "connector")
     assert w.table.item(0, rc).text() == "PASS"
     assert all(next(e for e in s.events if e.role == "event").reflective for s in w._current_sors)
@@ -242,3 +247,19 @@ def test_linkmap_changes_splice_to_connector(qapp, tmp_path, monkeypatch):
     w._change_event_type(splice.distance_km, None)
     assert w.table.item(0, rc).text() == "FAIL"
     w.close()
+
+
+def test_export_all_in_one(qapp, tmp_path):
+    from otdr_report.matching import Project, find_sor_files
+    from otdr_report.settings import ReportSettings
+    from otdr_report.synthetic import make_cable
+    make_cable(tmp_path, "A_SCP1", 2)
+    make_cable(tmp_path, "B_SCP2", 3)
+    p = Project()
+    p.load(find_sor_files(tmp_path))
+    dlg = appmod.ExportDialog(p, ReportSettings(), str(tmp_path), ["A_SCP1"])
+    dlg.from_f.setValue(2)
+    assert len(dlg.parts()) == 1
+    dlg.all_in_one.setChecked(True)
+    assert not dlg.per_cable.isChecked() and not dlg.cables.isEnabled()
+    assert sum(len(f) for _, f in dlg.parts()) == 5

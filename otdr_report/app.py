@@ -367,6 +367,10 @@ class ExportDialog(QDialog):
         self.project = project
         lay = QVBoxLayout(self)
 
+        self.all_in_one = QCheckBox("Όλα τα καλώδια και όλες οι μετρήσεις σε 1 PDF")
+        self.all_in_one.setStyleSheet("font-weight: bold;")
+        self.all_in_one.toggled.connect(self._all_in_one_toggled)
+        lay.addWidget(self.all_in_one)
         lay.addWidget(QLabel("Καλώδια για εξαγωγή:"))
         self.cables = QTreeWidget()
         self.cables.setHeaderLabels(["Καλώδιο", "Ίνες", "Ελλιπείς"])
@@ -407,6 +411,7 @@ class ExportDialog(QDialog):
         self.per_cable = QCheckBox("Ένα PDF ανά καλώδιο (αλλιώς ένα PDF για όλα)")
         self.per_cable.setChecked(s.one_pdf_per_cable)
         form.addRow("", self.per_cable)
+        self._nums = (min(nums), max(nums))
         self.summary = QCheckBox("Σελίδα σύνοψης στην αρχή κάθε καλωδίου")
         self.summary.setChecked(s.summary_page)
         form.addRow("", self.summary)
@@ -421,6 +426,17 @@ class ExportDialog(QDialog):
         bb.accepted.connect(self._ok)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+
+    def _all_in_one_toggled(self, on: bool):
+        """Όλα σε 1 PDF: επιλέγονται όλα τα καλώδια και όλες οι ίνες."""
+        if on:
+            for i in range(self.cables.topLevelItemCount()):
+                self.cables.topLevelItem(i).setCheckState(0, Qt.Checked)
+            self.from_f.setValue(self._nums[0])
+            self.to_f.setValue(self._nums[1])
+            self.per_cable.setChecked(False)
+        for wdg in (self.cables, self.from_f, self.to_f, self.per_cable):
+            wdg.setEnabled(not on)
 
     def _pick(self):
         d = QFileDialog.getExistingDirectory(self, "Φάκελος PDF", self.out.text())
@@ -577,6 +593,7 @@ class MainWindow(QMainWindow):
         self.plot.addLegend(offset=(70, 10), labelTextSize="8pt")
         self.linkmap = LinkMapWidget()
         self.linkmap.typeChangeRequested.connect(self._change_event_type)
+        self.linkmap.refreshRequested.connect(self._reload_linkmap)
         self.events_tabs = QTabWidget()
         self.events_tabs.currentChanged.connect(self._sync_linkmap)
 
@@ -1098,6 +1115,14 @@ class MainWindow(QMainWindow):
         sor = sors[idx] if 0 <= idx < len(sors) else sors[0]
         self.linkmap.set_measurement(sor, self.settings.thresholds, getattr(self, "_units_m", True))
 
+    def _reload_linkmap(self):
+        """Δεξί κλικ στο Link map → «Ανανέωση μέτρησης»: ξαναδείχνει την επιλεγμένη μέτρηση."""
+        tab = self.events_tabs.currentIndex()
+        self._show_fiber(self._current_fiber() if self.current_cable else None)
+        if 0 <= tab < self.events_tabs.count():
+            self.events_tabs.setCurrentIndex(tab)
+        self._sync_linkmap()
+
     def _change_event_type(self, distance_km: float, kind):
         """Διόρθωση κόλληση ↔ connector από το Link map, για όλα τα μήκη κύματος της ίνας."""
         sors = getattr(self, "_current_sors", [])
@@ -1254,6 +1279,9 @@ def main():
     data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
     overrides.use_store(overrides.OverrideStore(data_dir / "event_overrides.json"))
     app.setStyle("Fusion")
+    icon = resource("icon.ico")
+    if icon.exists():
+        app.setWindowIcon(QIcon(str(icon)))     # εικονίδιο στη γραμμή εργασιών των Windows
     w = MainWindow()
     w.show()
     args = [Path(a) for a in sys.argv[1:] if Path(a).exists()]

@@ -67,3 +67,17 @@ def node_positions(kms: list[float], x0: float, x1: float, gap: float) -> list[f
     for k in range(n - 2, -1, -1):
         xs[k] = min(xs[k], xs[k + 1] - gap)
     return xs
+
+
+# Τα εικονίδια είναι 52×52 px με το καλώδιο στις γραμμές 23–28· το line.png είναι 51 px ύψος
+# με το καλώδιο στις γραμμές 22–27. Για να είναι στην ίδια ευθεία, η γραμμή σχεδιάζεται στην
+# κλίμακα του εικονιδίου και 1 px (του εικονιδίου) πιο κάτω.
+ICON_PX = 52
+LINE_PX = 51
+LINE_SHIFT_PX = 1
+
+
+def line_band(size: float) -> tuple[float, float]:
+    """(απόσταση από την πάνω πλευρά του εικονιδίου, ύψος) για το line.png, σε μονάδες σχεδίασης."""
+    k = size / ICON_PX
+    return LINE_SHIFT_PX * k, LINE_PX * k

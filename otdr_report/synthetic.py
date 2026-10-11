@@ -19,7 +19,7 @@ def _s(text: str) -> bytes:
 
 def build_sor(wavelength: int, length_km: float, events: list[tuple[float, float, float]],
               ior: float = 1.4682, seed: int = 0, cable: str = "", fiber: str = "",
-              launch_m: float = 0.0) -> bytes:
+              launch_m: float = 0.0, after_end: tuple = ()) -> bytes:
     """events: (km, loss dB, reflectance dB ή 0 για μη ανακλαστικό).
 
     Με launch_m > 0 προστίθεται launch cable όπως στο FHO5000: connector στο τέλος του
@@ -67,6 +67,7 @@ def build_sor(wavelength: int, length_km: float, events: list[tuple[float, float
     all_ev = [(0.0, 0.0, -45.0, "1S9999LS")]
     all_ev += [(km, loss, refl, ("1F" if refl else "0F") + "9999LS") for km, loss, refl in ev]
     all_ev += [(length_km, 0.0, -14.0, "1E9999LS")]
+    all_ev += [(km, loss, 0.0, "0F9999LS") for km, loss in after_end]   # θόρυβος μετά το (E), όπως στο FHO5000
     kev = b"KeyEvents\0" + struct.pack("<H", len(all_ev))
     prev = 0.0
     total = 0.0
