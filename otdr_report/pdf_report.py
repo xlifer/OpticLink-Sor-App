@@ -19,9 +19,10 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (Flowable, Image, KeepTogether, PageBreak, Paragraph,
+from reportlab.platypus import (HRFlowable, Flowable, Image, KeepInFrame, PageBreak, Paragraph,
                                 SimpleDocTemplate, Spacer, Table, TableStyle)
 
+from .linkmap import asset_dir, icon_path, linkmap_events, node_kind, node_state
 from .matching import Cable, Fiber
 from .settings import ReportSettings, evaluate, event_ok, is_dead_fiber, prepare
 from .sor import SorError, SorFile, downsample, parse_sor
@@ -56,6 +57,11 @@ TEXT = {
         "dead": "Νεκρή ίνα στα {wl} nm: δεν βρέθηκε ίνα μετά το launch cable (FAIL).",
         "slope": "Κλίση (dB/km)", "criteria": "Κριτήρια PASS", "launch_cable": "Launch cable", "link_map": "Link map",
         "prepared": "Συντάχθηκε από", "verified": "Ελέγχθηκε από", "approved": "Εγκρίθηκε από",
+        "machine": "Στοιχεία οργάνου", "module": "Μοντέλο", "serial": "Αρ. σειράς",
+        "config": "Ρυθμίσεις μέτρησης", "test_wave": "Μήκος κύματος (nm)", "pw": "Παλμός (ns)",
+        "distance": "Απόσταση (km)", "test_time": "Χρόνος μέτρησης (s)", "resolution": "Ανάλυση (m)",
+        "scatter": "Σκέδαση (dB)", "start_loc": "Αρχή", "end_loc": "Τέλος", "location": "Τοποθεσία",
+        "cable_id": "Cable ID", "fiber_id": "Fiber ID", "measurement": "Μέτρηση",
     },
     "en": {
         "title": "OTDR Test Report",
@@ -74,17 +80,32 @@ TEXT = {
         "dead": "Dead fiber at {wl} nm: no fiber found after the launch cable (FAIL).",
         "slope": "Slope (dB/km)", "criteria": "PASS criteria", "launch_cable": "Launch cable", "link_map": "Link map",
         "prepared": "Prepared by", "verified": "Verified by", "approved": "Approved by",
+        "machine": "Machine Information", "module": "Module", "serial": "Serial No.",
+        "config": "Configuration of Test", "test_wave": "Test Wave (nm)", "pw": "PW (ns)",
+        "distance": "Distance (km)", "test_time": "Test Time (s)", "resolution": "Resolution (m)",
+        "scatter": "Backscatter (dB)", "start_loc": "Start Location", "end_loc": "End Location",
+        "location": "Location", "cable_id": "Cable ID", "fiber_id": "Fiber ID", "measurement": "Measurement",
     },
 }
 
 PASS_C = colors.HexColor("#1a7f37")
 FAIL_C = colors.HexColor("#cf222e")
 WARN_C = colors.HexColor("#9a6700")
-HEAD_BG = colors.HexColor("#0b3d6e")
-GRID_C = colors.HexColor("#c8d1dc")
-ZEBRA = colors.HexColor("#f3f6f9")
+GOLD = colors.HexColor("#e9af36")          # χρώματα Grandway
+STEEL = colors.HexColor("#767b80")
+HEAD_BG = GOLD                               # επικεφαλίδες πινάκων (σκούρο κείμενο για αντίθεση)
+HEAD_FG = colors.HexColor("#1f2328")
+LABEL_BG = colors.HexColor("#f1f2f3")
+GRID_C = colors.HexColor("#c9ccd0")
+ZEBRA = colors.HexColor("#fbf5e6")
 MUTED = colors.HexColor("#57606a")
 LAUNCH_C = colors.HexColor("#cf222e")
+
+
+TOP_MARGIN = 22 * mm        # χώρος για το logo πάνω δεξιά
+BOTTOM = 14 * mm
+BOTTOM_SIG = 21 * mm
+LOGO_H = 11 * mm
 
 
 def _register_fonts():
@@ -160,7 +181,7 @@ class TraceChart(Flowable):
         ymax = float(np.max(ys)) + 1.5
         if ymax - ymin < 5:
             ymin = max(0.0, ymax - 5)
-        ymax += (ymax - ymin) * 0.22  # χώρος για ονόματα αρχείων / launch cable
+        ymax += (ymax - ymin) * 0.15  # χώρος για το launch cable
 
         def tx(v): return left + (v - xmin) / (xmax - xmin) * pw
         def ty(v): return bottom + (v - ymin) / (ymax - ymin) * ph
@@ -228,9 +249,8 @@ class TraceChart(Flowable):
                 c.line(X, bottom + ph - 9, X, bottom + ph)
                 c.setFillColor(colors.HexColor("#24292f"))
                 c.drawCentredString(X, bottom + ph - 15, str(i))
-        # Όπως στην οθόνη του οργάνου: όνομα αρχείου και launch cable πάνω δεξιά
-        labels = [(s.path.name, "DejaVu", 6.5, WL_COLORS.get(s.wavelength, colors.black))
-                  for s in sors if s.path]
+        # Launch cable πάνω δεξιά (χωρίς ονόματα αρχείων/καλωδίων μέσα στο γράφημα)
+        labels = []
         if sors and sors[0].launch_km:
             labels.append((f"{self.launch_label}: {sors[0].launch_km * 1000:.1f} m", "DejaVu-Bold", 7, LAUNCH_C))
         if labels:
@@ -264,16 +284,15 @@ class TraceChart(Flowable):
 
 
 class LinkMap(Flowable):
-    """Σχηματική απεικόνιση της ζεύξης: launch → (S) → συμβάντα → (E)."""
+    """Σχηματική ζεύξη όπως στην οθόνη: από το (S) στο 0 έως το (E), χωρίς το launch cable."""
 
-    def __init__(self, sor: SorFile, width: float, units: Units, th, launch_label: str):
+    def __init__(self, sor: SorFile, width: float, units: Units, th):
         super().__init__()
         self.sor = sor
         self.width = width
-        self.height = 17 * mm
+        self.height = 19 * mm
         self.units = units
         self.th = th
-        self.launch_label = launch_label
 
     def wrap(self, aw, ah):
         return self.width, self.height
@@ -281,40 +300,42 @@ class LinkMap(Flowable):
     def draw(self):
         c = self.canv
         s, u = self.sor, self.units
-        nodes = [(i, e) for i, e in enumerate(s.events) if e.role not in ("launch",)]
+        nodes = linkmap_events(s)
         if not nodes:
             return
-        y = self.height / 2
-        x0 = 30 * mm if s.launch_km else 8 * mm
-        x1 = self.width - 8 * mm
+        size = 7 * mm
+        y = self.height / 2 - 1
+        x0, x1 = 6 * mm + size / 2, self.width - 6 * mm - size / 2
         step = (x1 - x0) / max(1, len(nodes) - 1)
-        xs = [x0 + k * step for k in range(len(nodes))]
+        xs = [x0 + k * step for k in range(len(nodes))] if len(nodes) > 1 else [(x0 + x1) / 2]
         c.saveState()
-        if s.launch_km:
-            c.setStrokeColor(LAUNCH_C); c.setLineWidth(1.2); c.setDash(3, 2)
-            c.line(4 * mm, y, x0, y)
-            c.setDash()
-            c.setFont("DejaVu", 6.5); c.setFillColor(LAUNCH_C)
-            c.drawCentredString((4 * mm + x0) / 2, y + 4, f"{self.launch_label}")
-            c.drawCentredString((4 * mm + x0) / 2, y - 9, f"{s.launch_km * 1000:.1f} m")
-        c.setStrokeColor(colors.HexColor("#1f6feb")); c.setLineWidth(1.6)
-        c.line(x0, y, xs[-1], y)
-        c.setFont("DejaVu", 6.5)
+        line = icon_path("line")
+        if line and len(xs) > 1:
+            lh = size * 0.3
+            c.drawImage(str(line), xs[0], y - lh / 2, xs[-1] - xs[0], lh, mask="auto")
+        else:
+            c.setStrokeColor(STEEL); c.setLineWidth(1.6)
+            c.line(xs[0], y, xs[-1], y)
         for k, ((i, e), x) in enumerate(zip(nodes, xs)):
-            ok = event_ok(e, self.th)
-            fill = PASS_C if ok else FAIL_C if ok is False else colors.HexColor("#8c959f")
-            c.setFillColor(fill); c.setStrokeColor(colors.white); c.setLineWidth(0.8)
-            if e.reflective:
-                c.rect(x - 4, y - 4, 8, 8, fill=1, stroke=1)
+            kind, state = node_kind(e), node_state(e, s, self.th)
+            icon = icon_path(f"{kind}_{state}")
+            if icon:
+                c.drawImage(str(icon), x - size / 2, y - size / 2, size, size, mask="auto")
             else:
-                c.circle(x, y, 4, fill=1, stroke=1)
+                ok = {"pass": PASS_C, "fail": FAIL_C}.get(state, colors.HexColor("#8c959f"))
+                c.setFillColor(ok); c.setStrokeColor(colors.white); c.setLineWidth(0.8)
+                if kind == "connector":
+                    c.rect(x - 4, y - 4, 8, 8, fill=1, stroke=1)
+                else:
+                    c.circle(x, y, 4, fill=1, stroke=1)
+            c.setFont("DejaVu", 6.5)
             c.setFillColor(colors.black)
-            tag = {"start": " (S)", "end": " (E)"}.get(e.role, "")
-            c.drawCentredString(x, y + 8, f"{i}{tag}")
+            tag = {"start": " (S)", "end": " (E)"}.get(kind, "")
+            c.drawCentredString(x, y + size / 2 + 2, f"{i}{tag}")
             c.setFillColor(MUTED)
-            c.drawCentredString(x, y - 13, u.fmt(e.rel_km))
+            c.drawCentredString(x, y - size / 2 - 7, u.fmt(e.rel_km))
             if k:
-                c.setFillColor(colors.HexColor("#0a3069"))
+                c.setFillColor(STEEL)
                 c.drawCentredString((xs[k - 1] + x) / 2, y + 3, u.fmt(e.section_km))
         c.restoreState()
 
@@ -383,11 +404,13 @@ class ReportBuilder:
     def __init__(self, settings: ReportSettings):
         _register_fonts()
         self.s = settings
-        self.t = TEXT.get(settings.language, TEXT["el"])
+        self.t = TEXT.get(settings.language, TEXT["en"])
+        # ύψος περιοχής κειμένου: μία σελίδα ανά μέτρηση
+        self._frame_h = A4[1] - TOP_MARGIN - (BOTTOM_SIG if settings.signatures else BOTTOM) - 1
         self.st = {
             "h1": ParagraphStyle("h1", fontName="DejaVu-Bold", fontSize=13, leading=16, spaceAfter=2),
             "h2": ParagraphStyle("h2", fontName="DejaVu-Bold", fontSize=9.5, leading=12,
-                                 spaceBefore=6, spaceAfter=3, textColor=HEAD_BG),
+                                 spaceBefore=4, spaceAfter=2, textColor=STEEL),
             "n": ParagraphStyle("n", fontName="DejaVu", fontSize=8, leading=10),
             "small": ParagraphStyle("s", fontName="DejaVu", fontSize=6.5, leading=8, textColor=MUTED),
             "right": ParagraphStyle("r", fontName="DejaVu", fontSize=7.5, leading=9.5, alignment=TA_RIGHT),
@@ -447,7 +470,7 @@ class ReportBuilder:
 
     def _table(self, rows, col_widths, result_col=None, font_size=7, muted_rows=()):
         head_style = ParagraphStyle("th", fontName="DejaVu-Bold", fontSize=font_size,
-                                    leading=font_size + 1.5, textColor=colors.white, alignment=1)
+                                    leading=font_size + 1.5, textColor=HEAD_FG, alignment=1)
         rows = [[Paragraph(_esc(str(h)), head_style) for h in rows[0]]] + rows[1:]
         tbl = Table(rows, colWidths=col_widths, repeatRows=1)
         style = [
@@ -540,69 +563,162 @@ class ReportBuilder:
         return story
 
     # ---------- σελίδα ίνας ----------
+    def _section(self, title: str):
+        return Paragraph(_esc(title), self.st["h2"])
+
+    def _kv_block(self, title: str, pairs: list[tuple[str, str]], width: float):
+        """Μικρός πίνακας «ετικέτα – τιμή» με τίτλο, π.χ. οι ρυθμίσεις του 1310."""
+        head = ParagraphStyle("kvh", fontName="DejaVu-Bold", fontSize=7.5, leading=9, textColor=HEAD_FG)
+        rows = [[Paragraph(_esc(title), head), ""]] + [[k, v] for k, v in pairs]
+        tbl = Table(rows, colWidths=[width * 0.48, width * 0.52])
+        tbl.setStyle(TableStyle([
+            ("FONT", (0, 0), (-1, -1), "DejaVu", 7.5),
+            ("SPAN", (0, 0), (-1, 0)),
+            ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG),
+            ("BACKGROUND", (0, 1), (0, -1), LABEL_BG),
+            ("TEXTCOLOR", (0, 1), (0, -1), STEEL),
+            ("FONT", (1, 1), (1, -1), "DejaVu-Bold", 7.5),
+            ("GRID", (0, 0), (-1, -1), 0.3, GRID_C),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        return tbl
+
+    def _side_by_side(self, blocks, width: float, gap: float = 4 * mm):
+        n = len(blocks)
+        w = (width - gap * (n - 1)) / n
+        cells, widths = [], []
+        for k, (title, pairs) in enumerate(blocks):
+            if k:
+                cells.append("")
+                widths.append(gap)
+            cells.append(self._kv_block(title, pairs, w))
+            widths.append(w)
+        tbl = Table([cells], colWidths=widths)
+        tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                 ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                 ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+        return tbl
+
     def fiber_story(self, cable: Cable, fiber: Fiber, sors: dict[int, SorFile]):
+        """Πάντα μία σελίδα ανά μέτρηση: αν δεν χωράει, μικραίνει ολόκληρη η σελίδα."""
         t = self.t
         th = self.s.thresholds
         wls = cable.wavelengths
         present = [sors[w] for w in wls if w in sors]
         units = Units(max((s.length_km for s in present), default=0))
+        width = A4[0] - 24 * mm
         subtitle = f"{t['cable']}: {_esc(cable.name)} &nbsp; · &nbsp; {t['fiber']}: <b>{_esc(fiber.display)}</b>"
-        story = [self._header(t["title"], subtitle, fiber_verdict(fiber, cable.required, th, sors)), Spacer(1, 3 * mm)]
+        story = [self._header(t["title"], subtitle, fiber_verdict(fiber, cable.required, th, sors)),
+                 Spacer(1, 2 * mm)]
 
-        head = [t["wl"], t["file"], t["date"], t["pulse"], t["ior"], f"{t['launch']} (m)",
-                f"{t['length']} ({units.name})", t["loss"], t["att"], t["result"]]
+        # 1. Στοιχεία οργάνου
+        ref = next((x for x in present if x.otdr_model or x.otdr_sn), present[0] if present else None)
+        story.append(self._section(t["machine"]))
+        story.append(self._machine_table(ref, width))
+        story.append(HRFlowable(width="100%", thickness=1, color=GOLD, spaceBefore=3, spaceAfter=1))
+
+        # 2. Ρυθμίσεις μέτρησης: 1310 αριστερά, 1550 δεξιά
+        story.append(self._section(t["config"]))
+        blocks = []
+        for w in wls:
+            s = sors.get(w)
+            if s is None:
+                blocks.append((f"{w} nm", [(t["test_wave"], t["missing"])]))
+                continue
+            blocks.append((f"{w} nm", [
+                (t["test_wave"], str(s.wavelength)),
+                (t["pw"], str(s.pulse_width_ns)),
+                (t["distance"], f"{s.test_range_km:g}" if s.test_range_km else "–"),
+                (t["test_time"], str(s.test_time_s) if s.test_time_s else "–"),
+                (t["ior"], f"{s.ior:.4f}"),
+                (t["resolution"], f"{s.resolution_km * 1000:.3f}" if s.resolution_km else "–"),
+            ]))
+        if blocks:
+            story.append(self._side_by_side(blocks, width))
+
+        # 3. Αρχή / τέλος ζεύξης
+        loc = ref or (present[0] if present else None)
+        story.append(Spacer(1, 1.5 * mm))
+        story.append(self._side_by_side([
+            (t["start_loc"], [(t["location"], _val(loc.location_a if loc else "")),
+                              (t["cable_id"], _val(loc.cable_id if loc else "")),
+                              (t["fiber_id"], _val(loc.fiber_id if loc else ""))]),
+            (t["end_loc"], [(t["location"], _val(loc.location_b if loc else "")),
+                            (t["cable_id"], _val(loc.cable_id if loc else "")),
+                            (t["fiber_id"], _val(loc.fiber_id if loc else ""))]),
+        ], width))
+
+        # 4. Αρχεία και αποτελέσματα
+        story.append(self._section(t["measurement"]))
+        head = [t["wl"], t["file"], t["date"], f"{t['launch']} (m)",
+                f"{t['length']} ({units.name})", t["loss"], t["att"], t["orl"], t["result"]]
         rows = [head]
         for w in wls:
             s = sors.get(w)
             if s is None:
-                rows.append([str(w), t["missing"], "", "", "", "", "", "", "", ""])
+                rows.append([str(w), t["missing"], "", "", "", "", "", "", ""])
                 continue
             rows.append([
-                str(w), _short(s.path.name if s.path else "", 34),
+                str(w), _short(s.path.name if s.path else "", 40),
                 s.date.strftime("%d/%m/%Y %H:%M") if s.date else "–",
-                str(s.pulse_width_ns), f"{s.ior:.4f}",
                 f"{s.launch_km * 1000:.1f}" if s.launch_km else "–",
-                units.fmt(s.length_km), _fmt(s.total_loss, 3), _fmt(s.attenuation, 3),
+                units.fmt(s.length_km), _fmt(s.total_loss, 3), _fmt(s.attenuation, 3), _fmt(s.orl or None, 2),
                 self._verdict(evaluate(s, th)),
             ])
-        widths = [11 * mm, 45 * mm, 23 * mm, 13 * mm, 13 * mm, 14 * mm, 16 * mm, 16 * mm, 12 * mm, 23 * mm]
-        story.append(self._table(rows, widths, result_col=9))
+        widths = [11 * mm, 52 * mm, 24 * mm, 14 * mm, 17 * mm, 16 * mm, 13 * mm, 15 * mm, 24 * mm]
+        story.append(self._table(rows, widths, result_col=8))
         for s in present:
             if th.enabled and is_dead_fiber(s):
                 story.append(Paragraph(f'<font color="{FAIL_C.hexval()}"><b>{_esc(t["dead"].format(wl=s.wavelength))}</b></font>',
                                        self.st["n"]))
-        story.append(Spacer(1, 2 * mm))
 
-        chart_w = A4[0] - 24 * mm
+        # 5. Συμβάντα ανά μήκος κύματος
+        for s in present:
+            story.append(self._section(f"{t['events']} – {s.wavelength} nm"))
+            story.append(self._events_table(s, units))
+
+        # 6. Link map (χωρίς launch cable, από το (S) στο 0)
         if present:
-            story.append(LinkMap(present[0], chart_w, units, th, t["launch_cable"]))
+            story.append(self._section(t["link_map"]))
+            story.append(LinkMap(present[0], width, units, th))
+
+        # 7. Γράφημα (με launch cable, χωρίς ονόματα αρχείων)
+        story.append(Spacer(1, 2 * mm))
         if self.s.chart_mode == "separate" and len(present) > 1:
-            h = 52 * mm if len(present) == 2 else 40 * mm
+            h = 46 * mm if len(present) == 2 else 36 * mm
             for s in present:
-                story.append(TraceChart([s], chart_w, h, units, f"{s.wavelength} nm", t["launch_cable"]))
+                story.append(TraceChart([s], width, h, units, f"{s.wavelength} nm", t["launch_cable"]))
                 story.append(Spacer(1, 1.5 * mm))
         elif present:
-            story.append(TraceChart(present, chart_w, 72 * mm, units, "", t["launch_cable"]))
-            story.append(Spacer(1, 1.5 * mm))
+            story.append(TraceChart(present, width, 66 * mm, units, "", t["launch_cable"]))
 
-        for s in present:
-            story.append(KeepTogether([
-                Paragraph(f"{t['events']} – {s.wavelength} nm", self.st["h2"]),
-                self._events_table(s, units),
-            ]))
         foot = []
-        if s_inst := next((x for x in present if x.supplier or x.otdr_model), None):
-            foot.append(f"{t['otdr']}: {_esc(' '.join(filter(None, [s_inst.supplier, s_inst.otdr_model, s_inst.otdr_sn])))}")
         if self.s.operator:
             foot.append(f"{t['operator']}: {_esc(self.s.operator)}")
         crit = criteria_text(th, self.s.language)
         if crit:
             foot.append(f"{t['criteria']}: {_esc(crit)}")
         if foot:
-            story.append(Spacer(1, 2 * mm))
+            story.append(Spacer(1, 1.5 * mm))
             story.append(Paragraph(" &nbsp; · &nbsp; ".join(foot), self.st["small"]))
-        story.append(PageBreak())
-        return story
+        return [KeepInFrame(width, self._frame_h, story, mode="shrink"), PageBreak()]
+
+    def _machine_table(self, ref, width: float):
+        t = self.t
+        rows = [[t["module"], _val(ref.otdr_model if ref else ""), t["serial"], _val(ref.otdr_sn if ref else "")]]
+        tbl = Table(rows, colWidths=[width * 0.14, width * 0.40, width * 0.14, width * 0.32])
+        tbl.setStyle(TableStyle([
+            ("FONT", (0, 0), (-1, -1), "DejaVu", 7.5),
+            ("FONT", (1, 0), (1, 0), "DejaVu-Bold", 7.5), ("FONT", (3, 0), (3, 0), "DejaVu-Bold", 7.5),
+            ("BACKGROUND", (0, 0), (0, 0), LABEL_BG), ("BACKGROUND", (2, 0), (2, 0), LABEL_BG),
+            ("TEXTCOLOR", (0, 0), (0, 0), STEEL), ("TEXTCOLOR", (2, 0), (2, 0), STEEL),
+            ("GRID", (0, 0), (-1, -1), 0.3, GRID_C),
+            ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        return tbl
 
     def _events_table(self, s: SorFile, units: Units):
         """Συμβάντα με τις γραμμές τμημάτων ανάμεσα, όπως στην αναφορά του οργάνου."""
@@ -637,8 +753,14 @@ class ReportBuilder:
         stamp = datetime.now().strftime("%d/%m/%Y %H:%M")
         signatures = self.s.signatures
 
+        logo = asset_dir() / "grandway_logo.png"
+
         def on_page(c, doc):
             c.saveState()
+            if logo.is_file():          # Grandway logo πάνω δεξιά σε κάθε σελίδα
+                w = LOGO_H * 411 / 201
+                c.drawImage(str(logo), A4[0] - 12 * mm - w, A4[1] - 7 * mm - LOGO_H, w, LOGO_H,
+                            mask="auto", preserveAspectRatio=True)
             c.setFont("DejaVu", 6.5)
             c.setFillColor(MUTED)
             c.drawString(12 * mm, 8 * mm, f"{t['generated']}: {stamp}")
@@ -654,7 +776,7 @@ class ReportBuilder:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = out_path.with_suffix(".part.pdf")
         doc = _CancellableDoc(str(tmp), pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
-                              topMargin=10 * mm, bottomMargin=(21 if signatures else 14) * mm,
+                              topMargin=TOP_MARGIN, bottomMargin=BOTTOM_SIG if signatures else BOTTOM,
                               title=f"{t['title']} – " + ", ".join(p[0].name for p in parts),
                               author=self.s.company or "", keep_going=keep_going)
         try:
@@ -719,6 +841,10 @@ def criteria_text(th, lang: str = "el") -> str:
 
 def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _val(s: str) -> str:
+    return (s or "").strip() or "–"
 
 
 def _short(s: str, n: int) -> str:

@@ -1,57 +1,24 @@
 """Link map στο παράθυρο: η ζεύξη από το (S) μέχρι το (E), με αλλαγή κόλλησης ↔ connector."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSizePolicy, QToolTip, QWidget
 
-from .settings import evaluate, event_ok
+from .linkmap import (KINDS, STATES, asset_dir, icon_path, linkmap_events,  # noqa: F401
+                      node_kind, node_state)
 from .sor import Event, SorFile
 
-KINDS = ("start", "end", "connector", "splice", "splitter")
-STATES = ("pass", "fail", "none")
 PASS_C, FAIL_C, GREY_C = QColor("#1a7f37"), QColor("#cf222e"), QColor("#8c959f")
-
-
-def asset_dir() -> Path:
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent.parent))
-    for p in (base / "otdr_report" / "assets", Path(__file__).parent / "assets"):
-        if p.is_dir():
-            return p
-    return Path(__file__).parent / "assets"
 
 
 def load_icon(name: str) -> QPixmap | None:
     """Εικονίδιο από otdr_report/assets/icons/<name>.png (π.χ. "splice_pass"), αν υπάρχει."""
-    p = asset_dir() / "icons" / f"{name}.png"
-    if p.exists():
+    p = icon_path(name)
+    if p:
         pm = QPixmap(str(p))
         return pm if not pm.isNull() else None
     return None
-
-
-def node_state(e: Event, sor: SorFile, th) -> str:
-    """pass / fail / none: το (E) δείχνει το συνολικό αποτέλεσμα της μέτρησης, τα υπόλοιπα το δικό τους."""
-    if th is None or not th.enabled:
-        return "none"
-    ok = evaluate(sor, th) if e.role == "end" else event_ok(e, th)
-    return "none" if ok is None else ("pass" if ok else "fail")
-
-
-def node_kind(e: Event) -> str:
-    if e.role in ("start", "origin"):
-        return "start"
-    if e.role == "end":
-        return "end"
-    return "connector" if e.reflective else "splice"
-
-
-def linkmap_events(sor: SorFile) -> list[tuple[int, Event]]:
-    """Τα συμβάντα του Link map: χωρίς το launch cable, από το (S) έως το (E)."""
-    return [(i, e) for i, e in enumerate(sor.events) if e.role != "launch"]
 
 
 class LinkMapWidget(QWidget):

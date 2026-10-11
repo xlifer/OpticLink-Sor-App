@@ -61,3 +61,58 @@ def test_real_grandway_file_in_report(tmp_path):
     assert evaluate(sor, th) is False  # connector 0.796 dB > 0.75
     th.check_connector = False
     assert evaluate(sor, th) is True   # ανακλάσεις -32 dB δεν μετράνε από προεπιλογή
+
+
+# ---------- 1.2.0: νέα σελίδα PDF ----------
+def _pages(pdf: Path) -> int:
+    import re
+    return len(re.findall(rb"/Type /Page[^s]", pdf.read_bytes()))
+
+
+def test_each_measurement_is_one_page_even_with_many_events(tmp_path):
+    import copy
+    from otdr_report.matching import Project, find_sor_files
+    from otdr_report.pdf_report import ReportBuilder
+    from otdr_report.settings import prepare
+    from otdr_report.sor import parse_sor
+    data = Path(__file__).parent / "data"
+    p = Project()
+    p.load([f for f in find_sor_files(data) if "scp51" in f.name])
+    cable = p.sorted_cables()[0]
+    fibers = cable.sorted_fibers()
+    s = ReportSettings(summary_page=False)
+    read = {}
+    for f in fibers:
+        sors = {w: prepare(parse_sor(m.path), s) for w, m in f.measurements.items()}
+        for sor in sors.values():                     # 40 ενδιάμεσα συμβάντα: δεν χωράνε κανονικά
+            mid = sor.events[1]
+            extra = []
+            for k in range(40):
+                e = copy.copy(mid)
+                e.distance_km = mid.distance_km + 0.0005 * (k + 1)
+                extra.append(e)
+            sor.events = sor.events[:2] + extra + sor.events[2:]
+            sor.apply_launch(sor.user_offset_km)
+        read[f.key] = sors
+    out = tmp_path / "x.pdf"
+    assert ReportBuilder(s).build(out, [(cable, fibers, read)])
+    assert _pages(out) == len(fibers)
+
+
+def test_english_default_and_new_sections(tmp_path):
+    import shutil, subprocess
+    from otdr_report.matching import Project, find_sor_files
+    data = Path(__file__).parent / "data"
+    p = Project()
+    p.load([f for f in find_sor_files(data) if "scp51_dis_101" in f.name])
+    assert ReportSettings().language == "en"
+    out = generate_reports([(c, c.sorted_fibers()) for c in p.sorted_cables()], tmp_path,
+                           ReportSettings(summary_page=False))
+    assert _pages(out[0]) == 1
+    if not shutil.which("pdftotext"):
+        return
+    txt = subprocess.run(["pdftotext", str(out[0]), "-"], capture_output=True, text=True).stdout
+    for needle in ("Machine Information", "FHO5000-T45F-LS-PM-TS-FM", "BMO2601150030017",
+                   "Configuration of Test", "Start Location", "End Location", "Link map"):
+        assert needle in txt, needle
+    assert txt.index("1310 nm") < txt.index("1550 nm")
