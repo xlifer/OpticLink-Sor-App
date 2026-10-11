@@ -691,25 +691,29 @@ class ReportBuilder:
             story.append(self._section(t["link_map"]))
             story.append(LinkMap(present[0], width, units, th))
 
-        # 7. Γράφημα (με launch cable, χωρίς ονόματα αρχείων)
-        story.append(Spacer(1, 2 * mm))
-        if self.s.chart_mode == "separate" and len(present) > 1:
-            h = 46 * mm if len(present) == 2 else 36 * mm
-            for s in present:
-                story.append(TraceChart([s], width, h, units, f"{s.wavelength} nm", t["launch_cable"]))
-                story.append(Spacer(1, 1.5 * mm))
-        elif present:
-            story.append(TraceChart(present, width, 66 * mm, units, "", t["launch_cable"]))
-
         foot = []
         if self.s.operator:
             foot.append(f"{t['operator']}: {_esc(self.s.operator)}")
         crit = criteria_text(th, self.s.language)
         if crit:
             foot.append(f"{t['criteria']}: {_esc(crit)}")
-        if foot:
-            story.append(Spacer(1, 1.5 * mm))
-            story.append(Paragraph(" &nbsp; · &nbsp; ".join(foot), self.st["small"]))
+        tail = [Spacer(1, 1.5 * mm), Paragraph(" &nbsp; · &nbsp; ".join(foot), self.st["small"])] if foot else []
+
+        # 7. Γράφημα (με launch cable, χωρίς ονόματα αρχείων): παίρνει όσο χώρο περισσεύει
+        #    στη σελίδα, ώστε η μέτρηση να χωράει πάντα σε μία σελίδα.
+        used = sum(f.wrap(width, self._frame_h)[1] + f.getSpaceBefore() + f.getSpaceAfter()
+                   for f in story + tail)
+        free = self._frame_h - used - 2 * mm
+        story.append(Spacer(1, 2 * mm))
+        if self.s.chart_mode == "separate" and len(present) > 1:
+            h = min(40 * mm, max(26 * mm, free / len(present) - 1.5 * mm))
+            for s in present:
+                story.append(TraceChart([s], width, h, units, f"{s.wavelength} nm", t["launch_cable"]))
+                story.append(Spacer(1, 1.5 * mm))
+        elif present:
+            story.append(TraceChart(present, width, min(55 * mm, max(35 * mm, free)), units, "",
+                                    t["launch_cable"]))
+        story += tail
         return [KeepInFrame(width, self._frame_h, story, mode="shrink"), PageBreak()]
 
     def _machine_table(self, ref, width: float):
