@@ -85,8 +85,8 @@ class LinkMapWidget(QWidget):
         y = top + size / 2
         xs = node_positions(kms, 14 + size / 2, w - 14 - size / 2, size + 24)
         if self._line and len(xs) > 1:
-            lh = max(5, int(size * 0.22))
-            p.drawPixmap(QRectF(xs[0], y - lh / 2, xs[-1] - xs[0], lh).toRect(), self._line)
+            # το line.png έχει το ίδιο ύψος με τα εικονίδια: ίδιο πάχος καλωδίου
+            p.drawPixmap(QRectF(xs[0], y - size / 2, xs[-1] - xs[0], size).toRect(), self._line)
         else:
             p.setPen(QPen(QColor("#767b80"), 3))
             p.drawLine(QPointF(xs[0], y), QPointF(xs[-1], y))

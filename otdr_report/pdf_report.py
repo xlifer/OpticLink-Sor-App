@@ -334,8 +334,8 @@ class LinkMap(Flowable):
         xs = node_positions(kms, 4 * mm + size / 2, self.width - 4 * mm - size / 2, size + 6 * mm)
         line = icon_path("line")
         if line and len(xs) > 1:
-            lh = size * 0.22
-            c.drawImage(str(line), xs[0], y - lh / 2, xs[-1] - xs[0], lh, mask="auto")
+            # το line.png έχει το ίδιο ύψος με τα εικονίδια: ίδιο πάχος καλωδίου
+            c.drawImage(str(line), xs[0], y - size / 2, xs[-1] - xs[0], size, mask="auto")
         else:
             c.setStrokeColor(STEEL); c.setLineWidth(1.6)
             c.line(xs[0], y, xs[-1], y)
