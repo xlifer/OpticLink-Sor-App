@@ -253,11 +253,10 @@ def test_linkmap_changes_splice_to_connector(qapp, tmp_path, monkeypatch):
     store2 = overrides.OverrideStore(tmp_path / "ov.json")
     s0 = w._current_sors[0]
     assert store2.get(s0.digest, next(e for e in s0.events if e.role == "event").distance_km) == "connector"
-    _dispose(w, qapp)
     # επαναφορά
     w._change_event_type(splice.distance_km, None)
     assert w.table.item(0, rc).text() == "FAIL"
-    w.close()
+    _dispose(w, qapp)
 
 
 def test_export_all_in_one(qapp, tmp_path):
