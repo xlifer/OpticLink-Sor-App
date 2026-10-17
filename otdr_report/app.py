@@ -4,10 +4,11 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pyqtgraph as pg
-from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
@@ -131,26 +132,43 @@ def open_folder(path: Path):
 
 
 # ---------------------------------------------------------------- εργασίες στο παρασκήνιο
-class Worker(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-    failed = Signal(str)
+class Worker:
+    """Ό,τι βλέπει η εργασία που τρέχει στο παρασκήνιο: `progress.emit(...)` και `cancelled`.
 
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
+    ΠΡΟΣΟΧΗ: εδώ ΔΕΝ υπάρχει αντικείμενο Qt. Παλιότερα ο worker ήταν QObject μέσα σε QThread και
+    καταστρεφόταν στο νήμα του παρασκηνίου: εκείνο κρατούσε κλείδωμα του Qt και περίμενε το GIL της
+    Python, ενώ το κύριο νήμα κρατούσε το GIL και περίμενε το ίδιο κλείδωμα (σποραδικό «πάγωμα»).
+    Τώρα η εργασία είναι απλό νήμα Python και στέλνει τα σήματα του _Job, που ζει στο κύριο νήμα.
+    """
+
+    def __init__(self, job: "_Job"):
+        self.progress = job.sig_progress
         self.cancelled = False
 
-    @Slot()
-    def run(self):
-        try:
-            self.finished.emit(self.fn(self))
-        except Exception as e:  # noqa: BLE001 – εμφανίζεται στον χρήστη
-            self.failed.emit(f"{type(e).__name__}: {e}")
+
+class _JobThread:
+    """Νήμα Python με το ίδιο μικρό API που χρειάζεται το κλείσιμο του παραθύρου (isRunning / wait)."""
+
+    def __init__(self, target):
+        self._t = threading.Thread(target=target, daemon=True)
+
+    def start(self):
+        self._t.start()
+
+    def isRunning(self) -> bool:
+        return self._t.is_alive()
+
+    def wait(self, ms: int = 0) -> bool:
+        self._t.join(ms / 1000 if ms else None)
+        return not self._t.is_alive()
 
 
 class _Job(QObject):
     """Ζει στο κύριο νήμα και ενημερώνει το παράθυρο προόδου με ασφάλεια."""
+
+    sig_progress = Signal(int, int, str)       # από το νήμα του παρασκηνίου → κύριο νήμα (queued)
+    sig_finished = Signal(object)
+    sig_failed = Signal(str)
 
     def __init__(self, parent, title, on_done):
         super().__init__(parent)
@@ -163,11 +181,14 @@ class _Job(QObject):
         self.dlg.setMinimumWidth(420)
         self.dlg.setAutoClose(False)
         self.dlg.setAutoReset(False)
+        self.sig_progress.connect(self.progress, Qt.QueuedConnection)
+        self.sig_finished.connect(self.finished, Qt.QueuedConnection)
+        self.sig_failed.connect(self.failed, Qt.QueuedConnection)
 
     @Slot(int, int, str)
     def progress(self, done, total, label):
         # Το setValue ενός modal QProgressDialog καλεί processEvents: χωρίς τη σημαία, το «τέλος»
-        # της εργασίας μπορούσε να τρέξει ΜΕΣΑ σε αυτή την κλήση (επανείσοδος) και να κολλήσει.
+        # της εργασίας μπορούσε να τρέξει ΜΕΣΑ σε αυτή την κλήση (επανείσοδος).
         # Μετρητής (όχι σημαία): ενημέρωση μέσα σε ενημέρωση δεν πρέπει να «ξεκλειδώνει» την εξωτερική.
         self._in_progress = getattr(self, "_in_progress", 0) + 1
         try:
@@ -197,9 +218,10 @@ class _Job(QObject):
             QTimer.singleShot(0, lambda: self.finished(result))
             return
         cancelled = self._close_dialog()
-        self.thread.quit()
+        self.thread.wait(5000)                      # το νήμα έχει ήδη τελειώσει τη δουλειά του
         if not getattr(self.parent(), "_closing", False):   # το παράθυρο κλείνει: χωρίς μηνύματα
             self.on_done(result, cancelled)
+        self.deleteLater()
 
     @Slot(str)
     def failed(self, msg):
@@ -207,8 +229,9 @@ class _Job(QObject):
             QTimer.singleShot(0, lambda: self.failed(msg))
             return
         self._close_dialog()
-        self.thread.quit()
+        self.thread.wait(5000)
         QMessageBox.critical(self.parent(), APP_NAME, msg)
+        self.deleteLater()
 
 
 def run_with_progress(parent, title: str, fn, on_done):
@@ -217,18 +240,20 @@ def run_with_progress(parent, title: str, fn, on_done):
         jobs = parent.__dict__.setdefault("_running_jobs", [])
         jobs.append(job)
         job.destroyed.connect(lambda *_: jobs.remove(job) if job in jobs else None)
-    thread = QThread(parent)
-    worker = Worker(fn)
-    worker.moveToThread(thread)
-    job.thread, job.worker = thread, worker
-    worker.progress.connect(job.progress)
-    worker.finished.connect(job.finished)
-    worker.failed.connect(job.failed)
+    worker = Worker(job)
+
+    def run():
+        try:
+            result = fn(worker)
+        except Exception as e:  # noqa: BLE001 – εμφανίζεται στον χρήστη
+            job.sig_failed.emit(f"{type(e).__name__}: {e}")
+        else:
+            job.sig_finished.emit(result)
+
+    job.worker = worker
+    job.thread = _JobThread(run)
     job.dlg.canceled.connect(lambda: setattr(worker, "cancelled", True))
-    thread.started.connect(worker.run)
-    thread.finished.connect(worker.deleteLater)
-    thread.finished.connect(job.deleteLater)
-    thread.start()
+    job.thread.start()
     job.dlg.show()
     return job
 
@@ -300,7 +325,7 @@ class SettingsDialog(QDialog):
         self.allow_incomplete = QCheckBox(
             "Να επιτρέπεται PDF για μετρήσεις χωρίς 1310 ΚΑΙ 1550 (με ευθύνη του χρήστη)")
         self.allow_incomplete.setChecked(s.allow_incomplete)
-        self.allow_incomplete.setStyleSheet(f"color: {FAIL_C.name()}; font-weight: bold;")
+        theme.style_label(self.allow_incomplete, "fail", "font-weight: bold;")
         self.allow_incomplete.toggled.connect(self._confirm_incomplete)
         f1.addRow("", self.allow_incomplete)
         lay.addWidget(g1)
@@ -362,7 +387,7 @@ class SettingsDialog(QDialog):
         more.addStretch()
         f2.addRow("", more)
         note = QLabel("Το PASS/FAIL βγαίνει μόνο από τα κριτήρια με τσεκ.")
-        note.setStyleSheet("color:#57606a")
+        theme.style_label(note, "muted")
         f2.addRow(note)
         lay.addWidget(g2)
 
@@ -518,7 +543,7 @@ class ExportDialog(QDialog):
         if s.allow_incomplete:
             self.only_complete.setChecked(False)
             note = QLabel(f"Προσοχή: έχεις επιτρέψει PDF για ελλιπείς μετρήσεις ({n_inc}).")
-            note.setStyleSheet(f"color: {FAIL_C.name()}; font-weight: bold;")
+            theme.style_label(note, "fail", "font-weight: bold;")
         else:
             self.only_complete.setChecked(True)
             self.only_complete.setEnabled(False)
@@ -526,7 +551,7 @@ class ExportDialog(QDialog):
                           "(αλλάζει από τις Ρυθμίσεις)." if n_inc else
                           "Όλες οι μετρήσεις έχουν 1310 και 1550.")
             if n_inc:
-                note.setStyleSheet(f"color: {MISS_C.name()}; font-weight: bold;")
+                theme.style_label(note, "warn", "font-weight: bold;")
         note.setWordWrap(True)
         form.addRow("", self.only_complete)
         form.addRow("", note)
@@ -717,7 +742,7 @@ class MainWindow(QMainWindow):
         self.filter_buttons["all"].setChecked(True)
         fl.addStretch()
         hint_r = QLabel("Δεξί κλικ σε μέτρηση: αφαίρεση / επαναφορά / προσθήκη")
-        hint_r.setStyleSheet("color:#6e7781")
+        theme.style_label(hint_r, "muted")
         fl.addWidget(hint_r)
         table_box = QWidget()
         tl = QVBoxLayout(table_box)
@@ -755,7 +780,7 @@ class MainWindow(QMainWindow):
         cl = QVBoxLayout(cables_box)
         cl.setContentsMargins(0, 0, 0, 0)
         hint = QLabel("Σύρε εδώ φάκελο ή αρχεία .sor")
-        hint.setStyleSheet("color:#57606a; padding:4px")
+        theme.style_label(hint, "muted", "padding:4px")
         cl.addWidget(self.tree)
         cl.addWidget(hint)
         # χωρίς ελάχιστο πλάτος: το πάνελ στενεύει όσο θέλει ο χρήστης (το Qt αγνοεί το 0, γι' αυτό 1)
@@ -1329,7 +1354,7 @@ class MainWindow(QMainWindow):
                     x = QTableWidgetItem(v)
                     x.setTextAlignment(Qt.AlignCenter)
                     if is_seg:
-                        x.setForeground(QBrush(QColor("#6e7781")))
+                        x.setForeground(QBrush(QColor(theme.color("muted"))))   # γραμμές «Τμήμα»
                     if c == 7 and ok is not None:
                         paint_verdict(x, ok)
                     tbl.setItem(r, c, x)
@@ -1339,7 +1364,7 @@ class MainWindow(QMainWindow):
             tbl.itemSelectionChanged.connect(lambda t=tbl: self._event_row_selected(t))
             att = f"{s.attenuation:.3f}" if s.attenuation is not None else "–"
             launch_txt = f"Launch {s.launch_km * 1000:.1f} m   ·   " if s.launch_km else ""
-            dead = (f'   <b style="color:{FAIL_C.name()}">ΝΕΚΡΗ ΙΝΑ: δεν βρέθηκε ίνα μετά το launch cable</b>'
+            dead = (f'   <b style="color:{theme.color("fail")}">ΝΕΚΡΗ ΙΝΑ: δεν βρέθηκε ίνα μετά το launch cable</b>'
                     if th.enabled and is_dead_fiber(s) else "")
             info = QLabel(dead + f"   {s.path.name}   ·   {launch_txt}Μήκος {units.fmt(s.length_km)} {units.name}   ·   "
                           f"Απώλεια {s.total_loss or 0:.3f} dB   ·   {att} dB/km   ·   Παλμός {s.pulse_width_ns} ns")

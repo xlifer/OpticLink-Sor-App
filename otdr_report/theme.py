@@ -34,19 +34,42 @@ def _palette(colors: dict[str, str], disabled_text: str) -> QPalette:
 def light_palette() -> QPalette:
     return _palette({
         "window": "#f6f8fa", "window_text": "#1f2328", "base": "#ffffff", "alt_base": "#f3f6f9",
-        "text": "#1f2328", "button": "#eef1f4", "button_text": "#1f2328", "highlight": "#2f81f7",
+        "text": "#1f2328", "button": "#eef1f4", "button_text": "#1f2328", "highlight": "#0969da",
         "highlight_text": "#ffffff", "tooltip_base": "#ffffe1", "tooltip_text": "#1f2328",
-        "placeholder": "#8c959f", "link": "#0969da", "bright_text": "#cf222e",
+        "placeholder": "#6e7781", "link": "#0969da", "bright_text": "#cf222e",
     }, "#8c959f")
 
 
 def dark_palette() -> QPalette:
     return _palette({
         "window": "#202328", "window_text": "#e6edf3", "base": "#16181c", "alt_base": "#24282e",
-        "text": "#e6edf3", "button": "#2b3036", "button_text": "#e6edf3", "highlight": "#2f81f7",
+        "text": "#e6edf3", "button": "#2b3036", "button_text": "#e6edf3", "highlight": "#1f6feb",
         "highlight_text": "#ffffff", "tooltip_base": "#2b3036", "tooltip_text": "#e6edf3",
         "placeholder": "#8b949e", "link": "#58a6ff", "bright_text": "#ff7b72",
     }, "#6e7681")
+
+
+# Χρώματα κειμένου με νόημα (σφάλμα / προειδοποίηση / υπόδειξη), ευανάγνωστα σε κάθε θέμα (αντίθεση ≥ 4.5:1)
+SEMANTIC = {
+    "light": {"fail": "#cf222e", "warn": "#9a6700", "muted": "#57606a"},
+    "dark": {"fail": "#ffa198", "warn": "#d29922", "muted": "#9198a1"},
+}
+
+
+def is_dark(app: QApplication | None = None) -> bool:
+    app = app or QApplication.instance()
+    return app is not None and app.palette().color(QPalette.Window).lightness() < 128
+
+
+def color(role: str, app: QApplication | None = None) -> str:
+    return SEMANTIC["dark" if is_dark(app) else "light"][role]
+
+
+def style_label(widget, role: str, extra: str = "") -> None:
+    """Χρώμα κειμένου που ακολουθεί το θέμα (ξαναεφαρμόζεται σε κάθε αλλαγή θέματος)."""
+    widget.setProperty("themeRole", role)
+    widget.setProperty("themeExtra", extra)
+    widget.setStyleSheet(f"color: {color(role)}; {extra}")
 
 
 def normalize(mode) -> str:
@@ -61,6 +84,11 @@ def refresh_widgets(app: QApplication) -> None:
     λευκοί πίνακες). Γι' αυτό stylesheets μόνο σε «φύλλα» (ετικέτες, κουμπιά) και όχι σε δοχεία.
     """
     for w in app.allWidgets():
+        role = w.property("themeRole")
+        if role:                                # χρώμα με νόημα: το νέο χρώμα του θέματος
+            style_label(w, role, w.property("themeExtra") or "")
+            w.update()
+            continue
         sheet = w.styleSheet()
         if sheet:                               # τα widgets με δικό τους στυλ ξαναϋπολογίζονται
             w.setStyleSheet("")

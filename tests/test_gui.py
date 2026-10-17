@@ -155,14 +155,31 @@ def test_remove_whole_cable_from_tree(win):
     assert len(win._removed) == 79
 
 
+def test_job_runs_without_qt_objects_in_the_worker_thread(qapp):
+    """Το «σποραδικό πάγωμα»: κανένα αντικείμενο Qt δεν ζει/καταστρέφεται στο νήμα της εργασίας."""
+    import threading
+    seen = []
+    parent = QtWidgets.QWidget()
+
+    def job(w):
+        seen.append((threading.current_thread() is not threading.main_thread(), type(w).__mro__))
+        w.progress.emit(1, 2, "x")
+        return 1
+    j = appmod.run_with_progress(parent, "test", job, lambda res, cancelled: seen.append(res))
+    wait(qapp, lambda: len(seen) == 2)
+    in_thread, mro = seen[0]
+    assert in_thread and appmod.QObject not in mro and seen[1] == 1
+    wait(qapp, lambda: not j.thread.isRunning())
+
+
 def test_finished_job_is_not_reported_as_cancelled(qapp):
     """δ) Το κλείσιμο του παραθύρου προόδου δεν πρέπει να μετράει ως «Ακύρωση»."""
     got = []
     parent = QtWidgets.QWidget()        # όπως στην εφαρμογή: γονέας το κύριο παράθυρο
-    appmod.run_with_progress(parent, "test", lambda w: 42, lambda res, cancelled: got.append((res, cancelled)))
+    j = appmod.run_with_progress(parent, "test", lambda w: 42, lambda res, cancelled: got.append((res, cancelled)))
     wait(qapp, lambda: got)
     assert got == [(42, False)]
-    wait(qapp, lambda: all(not t.isRunning() for t in parent.findChildren(appmod.QThread)))
+    wait(qapp, lambda: not j.thread.isRunning())
 
 
 def test_cancel_button_is_reported(qapp):
@@ -179,7 +196,7 @@ def test_cancel_button_is_reported(qapp):
     j.dlg.canceled.emit()                # όπως το κλικ στο κουμπί «Ακύρωση»
     wait(qapp, lambda: got)
     assert got == [("stopped", True)]
-    wait(qapp, lambda: all(not t.isRunning() for t in parent.findChildren(appmod.QThread)))
+    wait(qapp, lambda: not j.thread.isRunning())
 
 
 def test_load_message_texts():
@@ -200,10 +217,10 @@ def test_close_while_job_runs_waits_for_it(win, qapp):
         while not w.cancelled and time.time() < deadline:
             time.sleep(0.01)
         return "stopped"
-    appmod.run_with_progress(win, "test", job, lambda res, cancelled: got.append(res))
+    j = appmod.run_with_progress(win, "test", job, lambda res, cancelled: got.append(res))
     wait(qapp, lambda: started)
     win.close()
-    assert all(not t.isRunning() for t in win.findChildren(appmod.QThread))
+    assert not j.thread.isRunning()                    # το κλείσιμο περίμενε το νήμα να σταματήσει
     for _ in range(20):
         qapp.processEvents()
     assert got == []                                   # on_done δεν καλείται σε παράθυρο που κλείνει

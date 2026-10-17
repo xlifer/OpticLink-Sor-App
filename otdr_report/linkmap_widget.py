@@ -63,7 +63,7 @@ class LinkMapWidget(QWidget):
         p.fillRect(self.rect(), QColor("white"))
         self._hits = []
         if not self.sor:
-            p.setPen(GREY_C)
+            p.setPen(QColor("#57606a"))             # λευκό «χαρτί» σε κάθε θέμα: σκούρο γκρι (6.4:1)
             p.drawText(self.rect(), Qt.AlignCenter, "Link map: επίλεξε μέτρηση")
             return
         nodes = linkmap_events(self.sor)
