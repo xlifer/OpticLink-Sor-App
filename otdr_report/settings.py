@@ -7,6 +7,10 @@ from dataclasses import asdict, dataclass, field
 from .sor import Event, SorFile
 
 
+# Τυπικές μέγιστες απώλειες PLC splitter 1:N (dB), από datasheets που ακολουθούν Telcordia GR-1209/GR-1221
+SPLITTER_DEFAULTS = {"2": 4.0, "4": 7.4, "8": 10.5, "16": 13.8, "32": 17.1, "64": 21.0, "128": 24.0}
+
+
 @dataclass
 class Thresholds:
     """Κριτήρια Pass/Fail. Κάθε κριτήριο ενεργοποιείται ξεχωριστά.
@@ -26,6 +30,10 @@ class Thresholds:
     })                                   # dB/km, μέση εξασθένηση ίνας
     check_total_loss: bool = False
     max_total_loss: float = 2.0          # dB
+    # Splitters (μόνο σε live μετρήσεις 1625/1650): μέγιστη απώλεια ανά λόγο διαίρεσης, dB.
+    # Τυπικά μέγιστα PLC splitter (Telcordia GR-1209/1221, datasheets κατασκευαστών).
+    check_splitter: bool = True
+    max_splitter_loss: dict[str, float] = field(default_factory=lambda: dict(SPLITTER_DEFAULTS))
 
 @dataclass
 class ReportSettings:
@@ -90,6 +98,11 @@ def event_ok(e: Event, th: Thresholds) -> bool | None:
     if not th.enabled or e.role in ("origin", "launch", "end"):
         return None
     checked = False
+    if e.splitter_ratio:
+        if not th.check_splitter:
+            return None
+        lim = th.max_splitter_loss.get(str(e.splitter_ratio), SPLITTER_DEFAULTS.get(str(e.splitter_ratio)))
+        return e.splice_loss <= lim if lim is not None else None
     if e.reflective:
         if th.check_connector:
             checked = True
@@ -125,7 +138,7 @@ def evaluate(sor: SorFile, th: Thresholds) -> bool | None:
     if is_dead_fiber(sor):
         return False
     if not any((th.check_splice, th.check_connector, th.check_reflectance,
-                th.check_attenuation, th.check_total_loss)):
+                th.check_attenuation, th.check_total_loss, th.check_splitter and sor.is_live)):
         return None
     for e in sor.events:
         if event_ok(e, th) is False:

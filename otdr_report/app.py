@@ -23,8 +23,8 @@ from .pdf_report import (TEXT, Units, event_headers, event_rows, existing_pdf_co
                          generate_reports)
 from .linkmap_widget import LinkMapWidget
 from . import fiber_info, overrides
-from .settings import ReportSettings, evaluate, is_dead_fiber, prepare
-from .sor import parse_sor
+from .settings import SPLITTER_DEFAULTS, ReportSettings, evaluate, is_dead_fiber, prepare
+from .sor import SPLITTER_RATIOS, parse_sor
 
 APP_NAME = "Grandway Batch Report"
 # Σταθερά, για να μη χαθούν οι αποθηκευμένες ρυθμίσεις μετά τη μετονομασία
@@ -318,6 +318,25 @@ class SettingsDialog(QDialog):
         self.cb_refl = row("Μέγ. ανάκλαση", th.check_reflectance, self.refl)
         self.cb_att = row("Μέγ. εξασθένηση", th.check_attenuation, self.att1310, self.att1550, self.att1625)
         self.cb_total = row("Μέγ. συνολική απώλεια", th.check_total_loss, self.total)
+        # Splitters: μόνο σε live μετρήσεις 1625/1650, ένα όριο ανά λόγο διαίρεσης (τυπικά μέγιστα PLC)
+        self.split = {}
+        for n in SPLITTER_RATIOS:
+            sp = dspin(th.max_splitter_loss.get(str(n), SPLITTER_DEFAULTS[str(n)]), 0, 40, 0.1, 1, " dB")
+            sp.setPrefix(f"1:{n}  ")
+            self.split[n] = sp
+        self.cb_split = row("Μέγ. απώλεια splitter\n(live 1625 / 1650)", th.check_splitter,
+                            *[self.split[n] for n in SPLITTER_RATIOS[:4]])
+        more = QHBoxLayout()
+        for n in SPLITTER_RATIOS[4:]:
+            more.addWidget(self.split[n])
+            self.split[n].setEnabled(th.check_splitter)
+            self.cb_split.toggled.connect(self.split[n].setEnabled)
+        reset = QPushButton("Τυπικές τιμές")
+        reset.setToolTip("Τυπικά μέγιστα PLC splitter (Telcordia GR-1209/1221, datasheets κατασκευαστών)")
+        reset.clicked.connect(lambda: [self.split[n].setValue(SPLITTER_DEFAULTS[str(n)]) for n in SPLITTER_RATIOS])
+        more.addWidget(reset)
+        more.addStretch()
+        f2.addRow("", more)
         note = QLabel("Το PASS/FAIL βγαίνει μόνο από τα κριτήρια με τσεκ.")
         note.setStyleSheet("color:#57606a")
         f2.addRow(note)
@@ -374,6 +393,8 @@ class SettingsDialog(QDialog):
         th.max_attenuation.update({"1310": self.att1310.value(), "1550": self.att1550.value(),
                                    "1625": self.att1625.value()})
         th.max_total_loss = self.total.value()
+        th.check_splitter = self.cb_split.isChecked()
+        th.max_splitter_loss = {str(n): self.split[n].value() for n in SPLITTER_RATIOS}
         return s
 
 
@@ -538,7 +559,7 @@ class ExportDialog(QDialog):
                 continue
             c = self.project.cables[it.data(0, Qt.UserRole)]
             fibers = [f for f in c.sorted_fibers() if lo <= f.number <= hi
-                      and (not self.only_complete.isChecked() or c.required <= set(f.measurements))]
+                      and (not self.only_complete.isChecked() or c.required_for(f) <= set(f.measurements))]
             if fibers:
                 out.append((c, fibers))
         return out
@@ -674,6 +695,7 @@ class MainWindow(QMainWindow):
         self.linkmap = LinkMapWidget()
         self.linkmap.typeChangeRequested.connect(self._change_event_type)
         self.linkmap.refreshRequested.connect(self._reload_linkmap)
+        self.linkmap.eventSelected.connect(self.select_event)
         self.events_tabs = QTabWidget()
         self.events_tabs.currentChanged.connect(self._sync_linkmap)
 
@@ -899,7 +921,7 @@ class MainWindow(QMainWindow):
         select = None
         for c in self.project.sorted_cables():
             wls = c.wavelengths
-            fails = sum(1 for f in c.fibers.values() if fiber_verdict(f, c.required, th) is False)
+            fails = sum(1 for f in c.fibers.values() if fiber_verdict(f, c.required_for(f), th) is False)
             missing = len(c.incomplete())
             it = QTreeWidgetItem([c.name, str(len(c.fibers)), str(missing), str(fails)])
             it.setData(0, Qt.UserRole, c.name)
@@ -960,7 +982,7 @@ class MainWindow(QMainWindow):
         counts = {"all": len(fibers), "fail": 0, "missing": 0, "pass": 0}
         inf = float("inf")
         for r, f in enumerate(fibers):
-            verdict = fiber_verdict(f, cable.required, th)
+            verdict = fiber_verdict(f, cable.required_for(f), th)
             counts["fail"] += verdict is False
             counts["missing"] += verdict == "missing"
             counts["pass"] += verdict is True
@@ -977,10 +999,12 @@ class MainWindow(QMainWindow):
             for w in wls:
                 m = f.measurements.get(w)
                 if not m:
+                    needed = w in cable.required_for(f)     # π.χ. το 1310 δεν «λείπει» από live μέτρηση 1625
                     for k in range(4):
-                        x = SortItem("λείπει" if k == 3 else "", VERDICT_SORT["missing"] if k == 3 else inf)
+                        x = SortItem("λείπει" if k == 3 and needed else "",
+                                     VERDICT_SORT["missing"] if k == 3 and needed else inf)
                         x.setTextAlignment(Qt.AlignCenter)
-                        if k == 3:
+                        if k == 3 and needed:
                             paint_verdict(x, "missing")
                         self.table.setItem(r, col + k, x)
                 else:
@@ -1196,6 +1220,9 @@ class MainWindow(QMainWindow):
         return menu
 
     def _show_fiber(self, fiber: Fiber | None):
+        prev = getattr(self, "_current_fiber_shown", None)
+        if fiber is None or prev is None or fiber.key != prev.key:
+            self.linkmap.set_selected(None)      # νέα μέτρηση: καμία επιλογή
         self._current_fiber_shown = fiber
         self._current_sors = []
         self.linkmap.set_measurement(None, None)
@@ -1227,9 +1254,17 @@ class MainWindow(QMainWindow):
             region = pg.LinearRegionItem((-launch * scale, 0), movable=False,
                                          brush=pg.mkBrush(255, 235, 233, 120), pen=pg.mkPen(None))
             self.plot.addItem(region)
-        for k, s in enumerate(sors):
-            pen = pg.mkPen(WL_QCOLORS.get(s.wavelength, "#000"), width=1.2)
-            self.plot.plot(s.distance_axis * scale, s.trace, pen=pen, name=f"{s.wavelength} nm")
+        plotted = [x for x in sors if not x.is_live]     # live (1625/1650): χωρίς γράφημα X-Y
+        if not plotted:
+            note = pg.TextItem("Live μέτρηση (" + ", ".join(f"{x.wavelength} nm" for x in sors) +
+                               "): δεν υπάρχει γράφημα dB / απόσταση", color="#57606a", anchor=(0.5, 0.5))
+            self.plot.addItem(note)
+            note.setPos(0, 0)
+        for s in sors:
+            k = plotted.index(s) if s in plotted else -1
+            if k >= 0:
+                pen = pg.mkPen(WL_QCOLORS.get(s.wavelength, "#000"), width=1.2)
+                self.plot.plot(s.distance_axis * scale, s.trace, pen=pen, name=f"{s.wavelength} nm")
             if k == 0:
                 for i, e in enumerate(s.events):
                     line = pg.InfiniteLine(e.rel_km * scale, angle=90,
@@ -1252,6 +1287,9 @@ class MainWindow(QMainWindow):
                         paint_verdict(x, ok)
                     tbl.setItem(r, c, x)
             tbl.resizeColumnsToContents()
+            tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+            tbl.setSelectionMode(QAbstractItemView.SingleSelection)
+            tbl.itemSelectionChanged.connect(lambda t=tbl: self._event_row_selected(t))
             att = f"{s.attenuation:.3f}" if s.attenuation is not None else "–"
             launch_txt = f"Launch {s.launch_km * 1000:.1f} m   ·   " if s.launch_km else ""
             dead = (f'   <b style="color:{FAIL_C.name()}">ΝΕΚΡΗ ΙΝΑ: δεν βρέθηκε ίνα μετά το launch cable</b>'
@@ -1265,16 +1303,52 @@ class MainWindow(QMainWindow):
             bl.addWidget(info)
             bl.addWidget(tbl)
             self.events_tabs.addTab(box, f"{s.wavelength} nm")
-        max_len = max(s.length_km for s in sors)
-        if max_len:
+        max_len = max((s.length_km for s in plotted), default=0)
+        if not plotted:
+            self.plot.setXRange(-1, 1)
+            self.plot.setYRange(-1, 1)
+        elif max_len:
             self.plot.setXRange(-launch * 1.04 * scale, max_len * 1.08 * scale)
         title = f"{fiber.display}"
-        if sors[0].launch_km:
+        if plotted and sors[0].launch_km:
             title += f'   <span style="color:#cf222e">Launch cable: {sors[0].launch_km * 1000:.1f} m</span>'
         self.plot.setTitle(title, size="9pt")
         self._current_sors = sors
         self._units_m = units.m
         self._sync_linkmap()
+
+    # ---------- επιλογή συμβάντος: Link map ↔ πίνακας συμβάντων (γαλάζιο περίγραμμα)
+    @staticmethod
+    def _event_row(index: int) -> int:
+        """Γραμμή του πίνακα για το συμβάν: πριν από κάθε συμβάν (εκτός του πρώτου) υπάρχει γραμμή τμήματος."""
+        return 2 * index
+
+    def _current_events_table(self) -> QTableWidget | None:
+        page = self.events_tabs.currentWidget()
+        return page.findChild(QTableWidget) if page else None
+
+    def select_event(self, index: int | None):
+        """Επιλογή συμβάντος από το Link map: επιλέγεται και η γραμμή του στον πίνακα."""
+        self.linkmap.set_selected(index)
+        tbl = self._current_events_table()
+        if tbl is None:
+            return
+        tbl.blockSignals(True)
+        tbl.clearSelection()
+        if index is not None and 0 <= self._event_row(index) < tbl.rowCount():
+            row = self._event_row(index)
+            tbl.selectRow(row)
+            tbl.scrollToItem(tbl.item(row, 0))
+        tbl.blockSignals(False)
+
+    def _event_row_selected(self, tbl: QTableWidget):
+        """Επιλογή γραμμής στον πίνακα συμβάντων: το ίδιο συμβάν φαίνεται επιλεγμένο στο Link map."""
+        rows = {i.row() for i in tbl.selectedItems()}
+        if not rows:
+            return
+        row = min(rows)
+        if row % 2 == 0:                     # γραμμή συμβάντος (οι μονές είναι τμήματα «Seg.»)
+            self.linkmap.set_selected(row // 2)
 
     def _sync_linkmap(self, *_):
         """Το Link map δείχνει το μήκος κύματος της επιλεγμένης καρτέλας συμβάντων."""
@@ -1285,6 +1359,8 @@ class MainWindow(QMainWindow):
         idx = self.events_tabs.currentIndex()
         sor = sors[idx] if 0 <= idx < len(sors) else sors[0]
         self.linkmap.set_measurement(sor, self.settings.thresholds, getattr(self, "_units_m", True))
+        if self.linkmap.selected is not None:   # η επιλογή μένει και στην άλλη καρτέλα (1310 ↔ 1550)
+            self.select_event(self.linkmap.selected)
 
     def _reload_linkmap(self):
         """Δεξί κλικ στο Link map → «Ανανέωση μέτρησης»: ξαναδείχνει την επιλεγμένη μέτρηση."""
@@ -1306,7 +1382,8 @@ class MainWindow(QMainWindow):
         self._refresh()                                 # νέα PASS/FAIL σε πίνακα και λίστα καλωδίων
         if 0 <= tab < self.events_tabs.count():
             self.events_tabs.setCurrentIndex(tab)
-        what = {"connector": "Connector", "splice": "Κόλληση", None: "όπως το όργανο"}[kind]
+        what = {"connector": "Connector", "splice": "Κόλληση", None: "όπως το όργανο"}.get(
+            kind, f"Splitter 1:{str(kind).split(':')[-1]}")
         self.statusBar().showMessage(f"Το συμβάν ορίστηκε: {what}. Ισχύει και στο PDF.", 8000)
 
     # ---------- ρυθμίσεις & εξαγωγή

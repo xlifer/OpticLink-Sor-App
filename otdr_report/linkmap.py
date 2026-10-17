@@ -38,6 +38,8 @@ def node_kind(e: Event) -> str:
         return "start"
     if e.role == "end":
         return "end"
+    if e.splitter_ratio:
+        return "splitter"
     return "connector" if e.reflective else "splice"
 
 

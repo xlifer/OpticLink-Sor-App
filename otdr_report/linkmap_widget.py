@@ -1,4 +1,4 @@
-"""Link map στο παράθυρο: η ζεύξη από το (S) μέχρι το (E), με αλλαγή κόλλησης ↔ connector."""
+"""Link map στο παράθυρο: η ζεύξη από το (S) μέχρι το (E), με αλλαγή κόλλησης ↔ connector ↔ splitter."""
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QMenu, QSizePolicy, QToolTip, QWidget
 from .linkmap import (KINDS, STATES, asset_dir, icon_path, linkmap_events,  # noqa: F401
                       fit_labels, line_band, node_kind, node_positions, node_state,
                       scale_positions)
-from .sor import Event, SorFile
+from .sor import SPLITTER_RATIOS, Event, SorFile
 
 PASS_C, FAIL_C, GREY_C = QColor("#1a7f37"), QColor("#cf222e"), QColor("#8c959f")
 
@@ -26,6 +26,7 @@ class LinkMapWidget(QWidget):
     """Σχηματική ζεύξη. Κλικ σε ενδιάμεσο συμβάν → αλλαγή τύπου (connector / κόλληση)."""
 
     refreshRequested = Signal()                     # δεξί κλικ → «Ανανέωση μέτρησης»
+    eventSelected = Signal(int)                     # αριστερό κλικ σε συμβάν → αριθμός συμβάντος στο .sor
     typeChangeRequested = Signal(float, object)     # (απόσταση συμβάντος km από το OTDR, "connector"/"splice"/None)
 
     def __init__(self, parent=None):
@@ -34,6 +35,7 @@ class LinkMapWidget(QWidget):
         self.th = None
         self.units_m = True
         self._hits: list[tuple[QRectF, int, Event]] = []
+        self.selected: int | None = None            # επιλεγμένο συμβάν (γαλάζιο περίγραμμα)
         self.setMinimumHeight(130)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setMouseTracking(True)
@@ -43,6 +45,12 @@ class LinkMapWidget(QWidget):
     def set_measurement(self, sor: SorFile | None, th, units_m: bool = True):
         self.sor, self.th, self.units_m = sor, th, units_m
         self.update()
+
+    def set_selected(self, index: int | None):
+        """Επιλογή συμβάντος απ' έξω (π.χ. από τον πίνακα συμβάντων), χωρίς σήμα."""
+        if index != self.selected:
+            self.selected = index
+            self.update()
 
     def _fmt(self, km: float) -> str:
         return f"{km * 1000:.1f}" if self.units_m else f"{km:.4f}"
@@ -117,6 +125,15 @@ class LinkMapWidget(QWidget):
                 p.setBrush(QColor("white"))
                 p.drawRoundedRect(rect.adjusted(-3, -3, 3, 3), 5, 5)
                 self._draw_fallback(p, rect, kind)
+            if kind == "splitter" and e.splitter_ratio:            # λόγος διαίρεσης πάνω δεξιά
+                f2 = QFont(p.font()); f2.setBold(True); f2.setPointSizeF(max(6.0, p.font().pointSizeF() - 1))
+                p.save(); p.setFont(f2); p.setPen(QColor("#24292f"))
+                p.drawText(rect.adjusted(0, 1, -2, 0), Qt.AlignRight | Qt.AlignTop, f"1:{e.splitter_ratio}")
+                p.restore()
+            if i == self.selected:                                  # επιλογή: γαλάζιο περίγραμμα
+                p.setPen(QPen(QColor("#38a8f5"), 3))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(rect.adjusted(-4, -4, 4, 4), 6, 6)
             if kind in ("start", "end") and size >= 22:
                 p.setPen(FAIL_C)
                 p.drawText(rect.adjusted(3, 0, 0, -2), Qt.AlignLeft | Qt.AlignBottom, "S" if kind == "start" else "E")
@@ -157,11 +174,22 @@ class LinkMapWidget(QWidget):
                 return i, e
         return None
 
+    def mousePressEvent(self, ev):
+        """Αριστερό κλικ σε συμβάν: επιλογή (και στον πίνακα συμβάντων)."""
+        if ev.button() == Qt.LeftButton:
+            hit = self._hit(ev.position())
+            if hit:
+                self.selected = hit[0]
+                self.update()
+                self.eventSelected.emit(hit[0])
+        super().mousePressEvent(ev)
+
     def mouseMoveEvent(self, ev):
         hit = self._hit(ev.position())
         if hit and hit[1].role == "event":
             e = hit[1]
-            kind = "Connector" if e.reflective else "Κόλληση"
+            kind = (f"Splitter 1:{e.splitter_ratio}" if e.splitter_ratio
+                    else "Connector" if e.reflective else "Κόλληση")
             extra = " (διορθωμένο)" if e.override else ""
             QToolTip.showText(ev.globalPosition().toPoint(),
                               f"{kind}{extra} – {self._fmt(e.rel_km)} · απώλεια {e.splice_loss:.3f} dB\n"
@@ -176,12 +204,19 @@ class LinkMapWidget(QWidget):
     def build_menu(self, e: Event | None) -> QMenu:
         menu = QMenu(self)
         if e is not None:
-            a_con = QAction("Connector (ανακλαστικό)", menu, checkable=True, checked=e.reflective)
-            a_spl = QAction("Κόλληση (μη ανακλαστικό)", menu, checkable=True, checked=not e.reflective)
+            ratio = e.splitter_ratio
+            a_con = QAction("Connector (ανακλαστικό)", menu, checkable=True, checked=not ratio and e.reflective)
+            a_spl = QAction("Κόλληση (μη ανακλαστικό)", menu, checkable=True, checked=not ratio and not e.reflective)
             a_con.triggered.connect(lambda: self.typeChangeRequested.emit(e.distance_km, "connector"))
             a_spl.triggered.connect(lambda: self.typeChangeRequested.emit(e.distance_km, "splice"))
             menu.addAction(a_con)
             menu.addAction(a_spl)
+            if self.sor is not None and self.sor.is_live:        # splitters μόνο σε live μέτρηση 1625/1650
+                sub = menu.addMenu("Splitter")
+                for n in SPLITTER_RATIOS:
+                    a = QAction(f"Splitter 1:{n}", sub, checkable=True, checked=ratio == n)
+                    a.triggered.connect(lambda _c=False, n=n: self.typeChangeRequested.emit(e.distance_km, f"splitter:{n}"))
+                    sub.addAction(a)
             if e.override:
                 natural = "Connector" if e.raw_reflective else "Κόλληση"
                 menu.addAction(f"Επαναφορά όπως το όργανο ({natural})",

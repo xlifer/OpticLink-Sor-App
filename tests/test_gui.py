@@ -351,3 +351,61 @@ def test_cables_panel_resizes_independently_and_layout_persists(qapp, monkeypatc
     assert w2.top_split.sizes()[1] == 60 and w2.bottom_split.sizes()[1] > 60
     _dispose(w, qapp)
     _dispose(w2, qapp)
+
+
+def test_live_splitter_menu_and_event_selection_sync(qapp, tmp_path, monkeypatch):
+    from otdr_report import overrides
+    from otdr_report.synthetic import build_sor
+    monkeypatch.setattr(appmod.QSettings, "value", lambda self, key, default=None, type=None: default)
+    monkeypatch.setattr(appmod.QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(overrides, "STORE", overrides.OverrideStore(tmp_path / "ov.json"))
+    (tmp_path / "PON_SCP1_1625_0001.sor").write_bytes(build_sor(1625, 2.0, [(0.5, 10.2, 0), (1.2, 0.1, 0)]))
+    (tmp_path / "N_SCP1_1310_0001.sor").write_bytes(build_sor(1310, 2.0, [(0.5, 0.1, 0)]))
+    (tmp_path / "N_SCP1_1550_0001.sor").write_bytes(build_sor(1550, 2.0, [(0.5, 0.1, 0)]))
+    w = appmod.MainWindow()
+    w.resize(1400, 860)
+    w.show()
+    w.load_paths([tmp_path])
+    wait(qapp, lambda: w.project.file_count == 3)
+    # live: όχι «ελλιπής», με splitter στο μενού
+    live = w.project.cables["PON_SCP1"]
+    assert live.incomplete() == []
+    w._show_cable(live)
+    w.table.selectRow(0)
+    qapp.processEvents()
+    ev = next(e for e in w.linkmap.sor.events if e.role == "event")
+    menu = w.linkmap.build_menu(ev)
+    sub = next(a.menu() for a in menu.actions() if a.text() == "Splitter")
+    assert [a.text() for a in sub.actions()] == [f"Splitter 1:{n}" for n in (2, 4, 8, 16, 32, 64, 128)]
+    w._change_event_type(ev.distance_km, "splitter:8")
+    qapp.processEvents()
+    ev = next(e for e in w.linkmap.sor.events if e.role == "event")
+    assert ev.splitter_ratio == 8
+    assert w.table.item(0, col(w, "Αποτέλεσμα")).text() == "PASS"           # 10.2 ≤ 10.5 dB (1:8)
+    # αριστερό κλικ στο Link map → γραμμή στον πίνακα συμβάντων, και αντίστροφα
+    idx = w.linkmap.sor.events.index(ev)
+    w.linkmap.eventSelected.emit(idx)
+    tbl = w._current_events_table()
+    assert {i.row() for i in tbl.selectedItems()} == {2 * idx} and w.linkmap.selected == idx
+    tbl.selectRow(0)
+    qapp.processEvents()
+    assert w.linkmap.selected == 0
+    # κανονική μέτρηση: χωρίς splitter
+    w._show_cable(w.project.cables["N_SCP1"])
+    w.table.selectRow(0)
+    qapp.processEvents()
+    e2 = next(e for e in w.linkmap.sor.events if e.role == "event")
+    assert "Splitter" not in [a.text() for a in w.linkmap.build_menu(e2).actions()]
+    _dispose(w, qapp)
+
+
+def test_settings_dialog_splitter_limits(qapp):
+    from otdr_report.settings import ReportSettings
+    s = ReportSettings()
+    dlg = appmod.SettingsDialog(s)
+    dlg.split[8].setValue(11.0)
+    dlg.cb_split.setChecked(False)
+    out = dlg.result_settings()
+    assert out.thresholds.max_splitter_loss["8"] == 11.0 and not out.thresholds.check_splitter
+    import shiboken6
+    shiboken6.delete(dlg)                    # χωρίς γονέα: να μην καταστραφεί μετά το QApplication

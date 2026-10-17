@@ -371,6 +371,9 @@ class LinkMap(Flowable):
                     c.rect(x - 4, y - 4, 8, 8, fill=1, stroke=1)
                 else:
                     c.circle(x, y, 4, fill=1, stroke=1)
+            if kind == "splitter" and e.splitter_ratio:              # λόγος διαίρεσης πάνω δεξιά
+                c.setFont("DejaVu-Bold", 5.5); c.setFillColor(colors.black)
+                c.drawRightString(x + size / 2 - 0.6, y + size / 2 - 5.5, f"1:{e.splitter_ratio}")
             if kind in ("start", "end") and size >= 6 * mm:
                 c.setFont("DejaVu-Bold", 6.5); c.setFillColor(FAIL_C)
                 c.drawString(x - size / 2 + 1.2, y - size / 2 + 1.2, "S" if kind == "start" else "E")
@@ -410,7 +413,7 @@ def _tick_label(v):
 def fiber_verdict(fiber: Fiber, required, th, sors: dict[int, SorFile] | None = None) -> bool | str | None:
     """True=PASS, False=FAIL, "missing"=λείπει υποχρεωτικό μήκος κύματος, None=χωρίς κριτήρια.
 
-    `required`: τα υποχρεωτικά μήκη κύματος (Cable.required, δηλ. 1310 και 1550).
+    `required`: τα υποχρεωτικά μήκη κύματος (Cable.required_for: 1310 και 1550, ή μόνο το live λ).
 
     Με `sors` κρίνονται οι μετρήσεις όπως διαβάστηκαν τώρα από τον δίσκο (για το PDF)·
     χωρίς αυτό, όπως φορτώθηκαν (για την οθόνη).
@@ -630,11 +633,11 @@ class ReportBuilder:
             for w in wls:
                 sor = sors.get(w)
                 if sor is None:
-                    row += ["–", "–", "–", t["missing"]]
+                    row += ["–", "–", "–", t["missing"] if w in cable.required_for(f) else "–"]
                     continue
                 row += [units.fmt(sor.length_km), _fmt(sor.total_loss, 2),
                         _fmt(sor.attenuation, 3), self._verdict(evaluate(sor, th))]
-            v = fiber_verdict(f, cable.required, th, sors)
+            v = fiber_verdict(f, cable.required_for(f), th, sors)
             row.append(self._verdict(v))
             n_pass += v is True
             n_fail += v is False
@@ -650,7 +653,7 @@ class ReportBuilder:
             story.append(Paragraph(
                 f"{t['pass']}: <b>{n_pass}</b> &nbsp; · &nbsp; {t['fail']}: <b>{n_fail}</b>", self.st["n"]))
             story.append(Paragraph(f"{t['criteria']}: {_esc(crit)}", self.st["small"]))
-        miss = [f.display for f in fibers if not cable.required <= set(read[f.key])]
+        miss = [f.display for f in fibers if not cable.required_for(f) <= set(read[f.key])]
         if miss:
             story.append(Paragraph(f"{t['incomplete']}: " + ", ".join(miss), self.st["small"]))
         story += [NextPageTemplate("main"), PageBreak()]
@@ -713,7 +716,9 @@ class ReportBuilder:
             body, tail = self._fiber_parts(cable, fiber, sors, level)
             free = self._frame_h - _height(body + tail, width) - 3 * mm
             # ξεχωριστά γραφήματα: το ένα κάτω από το άλλο, ή δίπλα-δίπλα στο πιο συμπαγές επίπεδο
-            n_charts = len(present) if self.s.chart_mode == "separate" and len(present) > 1 and level < 2 else 1
+            plotted = [x for x in present if not x.is_live]        # live (1625/1650): χωρίς γράφημα
+            n_charts = (len(plotted) if self.s.chart_mode == "separate" and len(plotted) > 1 and level < 2
+                        else min(1, len(plotted)))
             if free >= n_charts * CHART_MIN[level] or level == 2 or not must_fit:
                 break
         story = body + self._charts(present, free, level) + tail
@@ -726,6 +731,10 @@ class ReportBuilder:
                 + [NextPageTemplate("main"), PageBreak()])
 
     def _charts(self, present, free, level):
+        """Γραφήματα OTDR· οι live μετρήσεις (1625/1650) δεν έχουν γράφημα X-Y."""
+        present = [x for x in present if not x.is_live]
+        if not present:
+            return []
         t = self.t
         width = A4[0] - 24 * mm
         units = Units(max((x.length_km for x in present), default=0))
@@ -751,7 +760,8 @@ class ReportBuilder:
         """(πάνω μέρος, κάτω μέρος) της σελίδας· ανάμεσα μπαίνει το γράφημα."""
         t = self.t
         th = self.s.thresholds
-        wls = cable.wavelengths
+        # μόνο τα μήκη κύματος της μέτρησης και όσα απαιτούνται (μια live 1625 δεν δείχνει 1310/1550)
+        wls = [w for w in cable.wavelengths if w in sors or w in cable.required_for(fiber)]
         present = [sors[w] for w in wls if w in sors]
         units = Units(max((x.length_km for x in present), default=0))
         width = A4[0] - 24 * mm
@@ -759,7 +769,7 @@ class ReportBuilder:
         fs = 7.5 if not compact else 6.8           # γραμματοσειρά μικρών πινάκων
         sec = self._section_c if compact else self._section
         subtitle = f"{t['cable']}: {_esc(cable.name)} &nbsp; · &nbsp; {t['fiber']}: <b>{_esc(fiber.display)}</b>"
-        body = [self._header(t["title"], subtitle, fiber_verdict(fiber, cable.required, th, sors)),
+        body = [self._header(t["title"], subtitle, fiber_verdict(fiber, cable.required_for(fiber), th, sors)),
                 Spacer(1, (2 if not compact else 1) * mm)]
 
         # 1. Στοιχεία οργάνου
@@ -852,7 +862,7 @@ class ReportBuilder:
         foot = []
         if self.s.operator:
             foot.append(f"{t['operator']}: {_esc(self.s.operator)}")
-        crit = criteria_text(th, self.s.language)
+        crit = criteria_text(th, self.s.language, [e.splitter_ratio for x in present for e in x.events if e.splitter_ratio])
         if crit:
             foot.append(f"{t['criteria']}: {_esc(crit)}")
         if foot:
@@ -1054,8 +1064,11 @@ def event_rows(s: SorFile, th, t: dict, units: Units):
     return out
 
 
-def criteria_text(th, lang: str = "el") -> str:
-    """Σύντομη περιγραφή των ενεργών κριτηρίων, π.χ. "κόλληση ≤ 0.30 dB, connector ≤ 0.75 dB"."""
+def criteria_text(th, lang: str = "el", splitters=()) -> str:
+    """Σύντομη περιγραφή των ενεργών κριτηρίων, π.χ. "κόλληση ≤ 0.30 dB, connector ≤ 0.75 dB".
+
+    `splitters`: οι λόγοι (π.χ. 8, 32) των splitter της μέτρησης· γράφονται μόνο τα δικά τους όρια.
+    """
     if not th.enabled:
         return ""
     el = lang == "el"
@@ -1071,6 +1084,11 @@ def criteria_text(th, lang: str = "el") -> str:
         out.append(f"{'εξασθένηση' if el else 'attenuation'} ≤ {att} dB/km")
     if th.check_total_loss:
         out.append(f"{'συνολική απώλεια' if el else 'total loss'} ≤ {th.max_total_loss:.2f} dB")
+    if th.check_splitter:
+        for n in sorted(set(splitters)):
+            lim = th.max_splitter_loss.get(str(n))
+            if lim is not None:
+                out.append(f"splitter 1:{n} ≤ {lim:.1f} dB")
     return ", ".join(out)
 
 
@@ -1176,7 +1194,7 @@ def generate_reports(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path, sett
                                                       f"{sor.wavelength} nm"))
                     continue
                 sors[w] = prepare(sor, settings)
-            missing = sorted(set(cable.required) - set(sors))
+            missing = sorted(set(cable.required_for(f)) - set(sors))
             if missing and not settings.allow_incomplete:
                 result.excluded.append((cable.name, f.display, missing))
                 tick("")                                  # δεν θα χτιστεί σελίδα

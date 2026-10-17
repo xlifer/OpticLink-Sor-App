@@ -18,6 +18,16 @@ from .sor import SorFile
 KINDS = ("connector", "splice")
 
 
+def valid_kind(kind) -> bool:
+    """connector / splice / splitter:N (N = 2, 4, … 128)."""
+    if kind in KINDS:
+        return True
+    if isinstance(kind, str) and kind.startswith("splitter:"):
+        from .sor import SPLITTER_RATIOS
+        return kind.split(":", 1)[1] in {str(n) for n in SPLITTER_RATIOS}
+    return False
+
+
 class OverrideStore:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else None
@@ -26,7 +36,7 @@ class OverrideStore:
         self._data: dict[str, dict[str, str]] = {}
         for d, ev in raw.items():
             if isinstance(d, str) and isinstance(ev, dict):
-                ok = {str(k): v for k, v in ev.items() if isinstance(v, str) and v in KINDS}
+                ok = {str(k): v for k, v in ev.items() if isinstance(v, str) and valid_kind(v)}
                 if ok:
                     self._data[d] = ok
 
@@ -40,7 +50,7 @@ class OverrideStore:
 
     def set(self, digest: str, distance_km: float, kind: str | None) -> None:
         """kind: "connector", "splice", ή None για επαναφορά στο αρχικό."""
-        if kind is not None and kind not in KINDS:
+        if kind is not None and not valid_kind(kind):
             raise ValueError(kind)
         with self._lock:
             ev = self._data.setdefault(digest, {})
@@ -65,6 +75,9 @@ class OverrideStore:
         for e in sor.events:
             kind = self.get(sor.digest, e.distance_km) if sor.digest else None
             # μόνο ενδιάμεσα συμβάντα· και μόνο αν διαφέρει από αυτό που έγραψε το όργανο
+            # splitter μόνο σε live μέτρηση (1625/1650)
+            if kind and kind.startswith("splitter:") and not sor.is_live:
+                kind = None
             if kind and e.role == "event" and kind != ("connector" if e.raw_reflective else "splice"):
                 e.override = kind
             else:
@@ -90,6 +103,8 @@ def toggle_event(sors: list[SorFile], event_distance_km: float, kind: str | None
     """
     changed = 0
     for sor in sors:
+        if kind and kind.startswith("splitter:") and not sor.is_live:
+            continue                    # οι splitters υπάρχουν μόνο στις live μετρήσεις (1625/1650)
         candidates = [e for e in sor.events if e.role == "event"
                       and abs(e.distance_km - event_distance_km) <= max(tolerance_km, 3 * sor.resolution_km)]
         if not candidates:

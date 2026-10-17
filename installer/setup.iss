@@ -1,8 +1,8 @@
 ; Inno Setup – δημιουργεί το GrandwayBatchReport-Setup-<έκδοση>.exe
-; Build: iscc /DAppVersion=3.0.0 installer\setup.iss  (μετά το pyinstaller)
+; Build: iscc /DAppVersion=3.5.0 installer\setup.iss  (μετά το pyinstaller)
 
 #ifndef AppVersion
-  #define AppVersion "3.0.0"
+  #define AppVersion "3.5.0"
 #endif
 
 [Setup]

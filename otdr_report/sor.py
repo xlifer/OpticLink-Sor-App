@@ -60,6 +60,14 @@ class _Reader:
         return ""
 
 
+LIVE_WAVELENGTHS = (1625, 1650)       # live μετρήσεις (PON): δεν συνοδεύονται από 1310/1550
+SPLITTER_RATIOS = (2, 4, 8, 16, 32, 64, 128)
+
+
+def is_live_wavelength(wl: int | float | None) -> bool:
+    return bool(wl) and any(abs(wl - x) <= 12 for x in LIVE_WAVELENGTHS)
+
+
 @dataclass
 class Event:
     number: int
@@ -76,8 +84,19 @@ class Event:
     segment_cum: float | None = None  # αθροιστική απώλεια στο τέλος του τμήματος
     cumulative_loss: float | None = None  # αθροιστική απώλεια μετά το συμβάν (None μέσα στο launch)
     role: str = "event"               # origin | launch | start | event | end
-    # Διόρθωση χρήστη από το Link map: "connector" ή "splice" (None = όπως το έγραψε το όργανο)
+    # Διόρθωση χρήστη από το Link map: "connector", "splice" ή "splitter:N" (π.χ. "splitter:8" = 1:8)
+    # (None = όπως το έγραψε το όργανο)
     override: str | None = None
+
+    @property
+    def splitter_ratio(self) -> int | None:
+        """Ν του splitter 1:N, αν ο χρήστης όρισε το συμβάν ως splitter (μόνο σε live μετρήσεις)."""
+        if self.override and self.override.startswith("splitter:"):
+            try:
+                return int(self.override.split(":", 1)[1])
+            except ValueError:
+                return None
+        return None
 
     @property
     def raw_reflective(self) -> bool:
@@ -103,6 +122,8 @@ class Event:
             return "Αρχή"
         if self.role == "end":
             return "Τέλος"
+        if self.splitter_ratio:
+            return f"Splitter 1:{self.splitter_ratio}"
         return "Ανακλαστικό" if self.reflective else "Μη ανακλ."
 
 
@@ -186,6 +207,11 @@ class SorFile:
                 e.cumulative_loss = None
             prev = e.distance_km
         self._computed_total = cum
+
+    @property
+    def is_live(self) -> bool:
+        """Live μέτρηση (1625 / 1650 nm, σε ενεργό δίκτυο PON): χωρίς γράφημα, με splitters."""
+        return is_live_wavelength(self.wavelength)
 
     @property
     def length_km(self) -> float:

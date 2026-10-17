@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .sor import SorError, SorFile, parse_sor
+from .sor import SorError, SorFile, is_live_wavelength, parse_sor
 
 KNOWN_WAVELENGTHS = (850, 1300, 1310, 1383, 1490, 1550, 1625, 1650)
 # Έγκυρη μέτρηση = και τα δύο μήκη κύματος (απόφαση χρήστη). Όποια λείπει → ΕΛΛΙΠΗΣ.
@@ -95,6 +95,11 @@ class Fiber:
         return sorted(self.measurements)
 
     @property
+    def is_live(self) -> bool:
+        """Live μέτρηση: μόνο 1625 / 1650 nm."""
+        return bool(self.measurements) and all(is_live_wavelength(w) for w in self.measurements)
+
+    @property
     def paths(self) -> list[Path]:
         """Όλα τα αρχεία της μέτρησης, μαζί με τα διπλότυπα."""
         return [m.path for m in self.measurements.values()] + list(self.duplicates)
@@ -112,17 +117,34 @@ class Cable:
     def fiber(self, number: int, sub: str = "") -> Fiber | None:
         return self.fibers.get((number, sub))
 
+    def required_for(self, fiber: "Fiber") -> frozenset[int]:
+        """Τα μήκη κύματος που πρέπει να έχει η μέτρηση.
+
+        Κανονική μέτρηση: 1310 και 1550. Live μέτρηση (μόνο 1625 / 1650, σε ενεργό PON) είναι
+        πλήρης μόνη της: δεν της «λείπουν» τα 1310 / 1550.
+        """
+        wls = set(fiber.measurements)
+        if wls and all(is_live_wavelength(w) for w in wls):
+            return frozenset(wls)
+        return self.required
+
     @property
     def wavelengths(self) -> list[int]:
-        """Τα υποχρεωτικά μήκη κύματος (1310, 1550) και όσα άλλα υπάρχουν στο καλώδιο."""
-        s: set[int] = set(self.required)
+        """Τα υποχρεωτικά μήκη κύματος (1310, 1550) και όσα άλλα υπάρχουν στο καλώδιο.
+
+        Καλώδιο μόνο με live μετρήσεις δεν παίρνει στήλες 1310 / 1550.
+        """
+        s: set[int] = set()
+        if not self.fibers or any(f.measurements and not f.is_live for f in self.fibers.values()):
+            s.update(self.required)
         for f in self.fibers.values():
             s.update(f.measurements)
         return sorted(s)
 
     def incomplete(self) -> list[Fiber]:
-        """Μετρήσεις χωρίς όλα τα υποχρεωτικά μήκη κύματος (1310, 1550). Τα επιπλέον (π.χ. 1625) δεν μετράνε."""
-        return [f for f in self.sorted_fibers() if not self.required <= set(f.measurements)]
+        """Μετρήσεις χωρίς όλα τα υποχρεωτικά μήκη κύματος (1310, 1550). Τα επιπλέον (π.χ. 1625) δεν μετράνε,
+        και μια live μέτρηση (μόνο 1625 / 1650) δεν είναι ελλιπής."""
+        return [f for f in self.sorted_fibers() if not self.required_for(f) <= set(f.measurements)]
 
 
 def _parts(prefix: str) -> list[str]:
