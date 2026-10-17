@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pyqtgraph as pg
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressDialog,
                                QPushButton, QSpinBox, QSplitter, QStyle, QStyledItemDelegate,
-                               QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
+                               QTabBar, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 from . import __version__
@@ -1523,6 +1523,34 @@ class MainWindow(QMainWindow):
         run_with_progress(self, "Δημιουργία PDF…", job, done)
 
 
+class WorkspaceTabBar(QTabBar):
+    """Μπάρα καρτελών εργασίας: έντονα γράμματα, άνετο μέγεθος, χρυσή γραμμή στην επιλεγμένη.
+
+    Ζωγραφίζεται χωρίς stylesheet, ώστε η αλλαγή θέματος (φωτεινό/σκούρο) να περνά σε όλα τα
+    παράθυρα μέσα στις καρτέλες.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        f = QFont(self.font())
+        f.setBold(True)
+        self.setFont(f)
+        self.setDrawBase(False)
+
+    def tabSizeHint(self, index):
+        return super().tabSizeHint(index) + QSize(28, 10)
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        i = self.currentIndex()
+        if i < 0:
+            return
+        r = self.tabRect(i)
+        p = QPainter(self)
+        p.fillRect(r.left(), r.bottom() - 2, r.width(), 3, QColor("#e9af36"))
+        p.end()
+
+
 class AppWindow(QMainWindow):
     """Κύριο παράθυρο: δύο καρτέλες εργασίας, «1310 / 1550» και «Live 1625 / 1650».
 
@@ -1538,6 +1566,8 @@ class AppWindow(QMainWindow):
         self.setAcceptDrops(True)
         self.qs = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self.tabs = QTabWidget()
+        # Χωρίς stylesheet (βλ. theme.refresh_widgets): η μπάρα ζωγραφίζει μόνη της τη χρυσή γραμμή
+        self.tabs.setTabBar(WorkspaceTabBar())
         self.tabs.setDocumentMode(True)
         self.workspaces: dict[str, MainWindow] = {}
         for mode, title in WORKSPACES:
@@ -1546,8 +1576,7 @@ class AppWindow(QMainWindow):
             ws.settingsChanged.connect(lambda m=mode: self._settings_changed(m))
             self.workspaces[mode] = ws
             self.tabs.addTab(ws, title)
-        self.tabs.setStyleSheet("QTabBar::tab { padding: 6px 18px; font-weight: bold; }"
-                                "QTabBar::tab:selected { border-bottom: 3px solid #e9af36; }")
+
         self.setCentralWidget(self.tabs)
         self.tabs.setCurrentIndex(int(self.qs.value("workspaceTab", 0) or 0) % self.tabs.count())
 

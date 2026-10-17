@@ -53,6 +53,24 @@ def normalize(mode) -> str:
     return mode if mode in {m for m, _ in THEMES} else DEFAULT_THEME
 
 
+def refresh_widgets(app: QApplication) -> None:
+    """Μετά από αλλαγή θέματος ενώ τρέχει η εφαρμογή: όλα τα στοιχεία παίρνουν τα νέα χρώματα.
+
+    ΠΡΟΣΟΧΗ: stylesheet σε widget που έχει παιδιά (π.χ. στο QTabWidget των καρτελών εργασίας) «παγώνει»
+    την παλέτα όλων των παιδιών και η αλλαγή θέματος εφαρμοζόταν μισή (σκούρο φόντο με σκούρα γράμματα,
+    λευκοί πίνακες). Γι' αυτό stylesheets μόνο σε «φύλλα» (ετικέτες, κουμπιά) και όχι σε δοχεία.
+    """
+    for w in app.allWidgets():
+        sheet = w.styleSheet()
+        if sheet:                               # τα widgets με δικό τους στυλ ξαναϋπολογίζονται
+            w.setStyleSheet("")
+            w.setStyleSheet(sheet)
+        else:
+            w.style().unpolish(w)
+            w.style().polish(w)
+        w.update()
+
+
 def apply_theme(app: QApplication, mode: str) -> str:
     """Εφαρμόζει το θέμα σε όλη την εφαρμογή (αμέσως) και επιστρέφει αυτό που εφαρμόστηκε."""
     mode = normalize(mode)
@@ -68,4 +86,5 @@ def apply_theme(app: QApplication, mode: str) -> str:
     else:
         dark = app.styleHints().colorScheme() == Qt.ColorScheme.Dark
         app.setPalette(dark_palette() if dark else light_palette())
+    refresh_widgets(app)
     return mode
