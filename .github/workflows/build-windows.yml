@@ -58,16 +58,16 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.ver.outputs.version }} installer\setup.iss
-      - name: Build the previous release 2.1.0 (for the real upgrade test)
+      - name: Build the previous release 3.0.0 (for the real upgrade test)
         run: |
-          git fetch --depth=1 origin 7e220cae64e8756ff1439bc787648bbd2bc77c5c
-          git worktree add ..\old 7e220cae64e8756ff1439bc787648bbd2bc77c5c
+          git fetch --depth=1 origin 91e20b5374d66cae83ddd851d231b5ab1bed46db
+          git worktree add ..\old 91e20b5374d66cae83ddd851d231b5ab1bed46db
           cd ..\old
           pyinstaller --noconfirm GrandwayBatchReport.spec
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=2.1.0 installer\setup.iss
-      - name: Upgrade 2.1.0 -> new version (app open, then closed)
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=3.0.0 installer\setup.iss
+      - name: Upgrade 3.0.0 -> new version (app open, then closed)
         shell: bash
-        run: python tools/check_upgrade.py ../old/dist/GrandwayBatchReport-Setup-2.1.0.exe "$(ls dist/GrandwayBatchReport-Setup-*.exe)" dist/GrandwayBatchReport build/upgrade-check
+        run: python tools/check_upgrade.py ../old/dist/GrandwayBatchReport-Setup-3.0.0.exe "$(ls dist/GrandwayBatchReport-Setup-*.exe)" dist/GrandwayBatchReport build/upgrade-check
       - uses: actions/upload-artifact@v4
         if: always()
         with:

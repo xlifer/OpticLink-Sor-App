@@ -163,6 +163,8 @@ class Project:
     errors: list[tuple[Path, str]] = field(default_factory=list)
     group_level: int | None = None
     required: frozenset[int] = REQUIRED_WAVELENGTHS
+    # Καρτέλα εργασίας: False = μόνο 1310/1550 κ.λπ., True = μόνο live 1625/1650, None = όλα
+    live: bool | None = None
     _items: list[tuple[Path, SorFile, NameInfo]] = field(default_factory=list)
     _seen: set[Path] = field(default_factory=set)
     _stat: dict[Path, tuple[float, int]] = field(default_factory=dict)
@@ -291,13 +293,17 @@ class Project:
             if named and sor.wavelength and abs(named - sor.wavelength) > WAVELENGTH_TOLERANCE_NM:
                 return p, None, None, (f"Το όνομα λέει {named} nm αλλά η μέτρηση μέσα στο αρχείο "
                                        f"είναι {sor.wavelength} nm")
+            if self.live is not None and is_live_wavelength(sor.wavelength) != self.live:
+                return p, None, None, OTHER          # ανήκει στην άλλη καρτέλα εργασίας
             return p, _file_stat(p), sor, None
 
         index = {it[0]: i for i, it in enumerate(self._items)}
         total = len(todo)
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for i, (p, st, sor, err) in enumerate(ex.map(work, todo), 1):
-                if err:
+                if err is OTHER:
+                    res.other.append(p)
+                elif err:
                     self.errors.append((p, err))
                     res.failed.append((p, err))
                     if p in index:                       # ήταν φορτωμένο αλλά τώρα δεν διαβάζεται
@@ -325,6 +331,9 @@ class Project:
         return res
 
 
+OTHER = object()                # σημάδι: το αρχείο είναι για την άλλη καρτέλα εργασίας
+
+
 @dataclass
 class LoadResult:
     found: int = 0              # αρχεία που ζητήθηκαν
@@ -334,6 +343,7 @@ class LoadResult:
     failed: list[tuple[Path, str]] = field(default_factory=list)
     cancelled: bool = False
     not_processed: int = 0      # δεν πρόλαβαν να διαβαστούν λόγω ακύρωσης
+    other: list[Path] = field(default_factory=list)   # για την άλλη καρτέλα (1310/1550 ↔ live 1625/1650)
 
 
 def _file_stat(p: Path) -> tuple[float, int] | None:

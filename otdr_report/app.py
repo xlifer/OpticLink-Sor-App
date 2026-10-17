@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pyqtgraph as pg
-from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
@@ -22,7 +22,7 @@ from .matching import Cable, Fiber, Project, _natural_key, find_sor_files
 from .pdf_report import (TEXT, Units, event_headers, event_rows, existing_pdf_conflicts, fiber_verdict,
                          generate_reports)
 from .linkmap_widget import LinkMapWidget
-from . import fiber_info, overrides
+from . import fiber_info, overrides, theme
 from .settings import SPLITTER_DEFAULTS, ReportSettings, evaluate, is_dead_fiber, prepare
 from .sor import SPLITTER_RATIOS, parse_sor
 
@@ -166,9 +166,16 @@ class _Job(QObject):
 
     @Slot(int, int, str)
     def progress(self, done, total, label):
-        self.dlg.setMaximum(total)
-        self.dlg.setValue(done)
-        self.dlg.setLabelText(f"{self.title}\n{label}" if label else self.title)
+        # Το setValue ενός modal QProgressDialog καλεί processEvents: χωρίς τη σημαία, το «τέλος»
+        # της εργασίας μπορούσε να τρέξει ΜΕΣΑ σε αυτή την κλήση (επανείσοδος) και να κολλήσει.
+        # Μετρητής (όχι σημαία): ενημέρωση μέσα σε ενημέρωση δεν πρέπει να «ξεκλειδώνει» την εξωτερική.
+        self._in_progress = getattr(self, "_in_progress", 0) + 1
+        try:
+            self.dlg.setMaximum(total)
+            self.dlg.setValue(done)
+            self.dlg.setLabelText(f"{self.title}\n{label}" if label else self.title)
+        finally:
+            self._in_progress -= 1
 
     def _close_dialog(self) -> bool:
         """Κλείνει το παράθυρο προόδου και επιστρέφει αν ο χρήστης πάτησε «Ακύρωση».
@@ -186,6 +193,9 @@ class _Job(QObject):
 
     @Slot(object)
     def finished(self, result):
+        if getattr(self, "_in_progress", 0):        # όχι μέσα στο setValue: αμέσως μετά
+            QTimer.singleShot(0, lambda: self.finished(result))
+            return
         cancelled = self._close_dialog()
         self.thread.quit()
         if not getattr(self.parent(), "_closing", False):   # το παράθυρο κλείνει: χωρίς μηνύματα
@@ -193,6 +203,9 @@ class _Job(QObject):
 
     @Slot(str)
     def failed(self, msg):
+        if getattr(self, "_in_progress", 0):
+            QTimer.singleShot(0, lambda: self.failed(msg))
+            return
         self._close_dialog()
         self.thread.quit()
         QMessageBox.critical(self.parent(), APP_NAME, msg)
@@ -224,9 +237,20 @@ def run_with_progress(parent, title: str, fn, on_done):
 class SettingsDialog(QDialog):
     def __init__(self, s: ReportSettings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Ρυθμίσεις αναφοράς")
+        self.setWindowTitle("Ρυθμίσεις")
         self.s = s
         lay = QVBoxLayout(self)
+
+        # Εμφάνιση του ίδιου του προγράμματος (όχι του PDF): αποθηκεύεται χωριστά, ισχύει αμέσως
+        g0 = QGroupBox("Εμφάνιση προγράμματος")
+        f0 = QFormLayout(g0)
+        self.theme = QComboBox()
+        for mode, label in theme.THEMES:
+            self.theme.addItem(label, mode)
+        current = theme.normalize(QSettings(SETTINGS_ORG, SETTINGS_APP).value(theme.SETTINGS_KEY, theme.DEFAULT_THEME))
+        self.theme.setCurrentIndex(max(0, self.theme.findData(current)))
+        f0.addRow("Θέμα", self.theme)
+        lay.addWidget(g0)
 
         g1 = QGroupBox("Στοιχεία αναφοράς")
         f1 = QFormLayout(g1)
@@ -499,7 +523,7 @@ class ExportDialog(QDialog):
             self.only_complete.setChecked(True)
             self.only_complete.setEnabled(False)
             note = QLabel(f"{n_inc} μετρήσεις χωρίς 1310 και 1550 δεν θα μπουν στο PDF "
-                          "(αλλάζει από τις Ρυθμίσεις αναφοράς)." if n_inc else
+                          "(αλλάζει από τις Ρυθμίσεις)." if n_inc else
                           "Όλες οι μετρήσεις έχουν 1310 και 1550.")
             if n_inc:
                 note.setStyleSheet(f"color: {MISS_C.name()}; font-weight: bold;")
@@ -566,9 +590,26 @@ class ExportDialog(QDialog):
 
 
 # ---------------------------------------------------------------- κύριο παράθυρο
+WORKSPACES = (("standard", "1310 / 1550"), ("live", "Live 1625 / 1650"))
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    """Χώρος εργασίας: «standard» (1310/1550) ή «live» (1625/1650, με splitters, χωρίς γράφημα).
+
+    Οι δύο χώροι είναι εντελώς χωριστοί (δικό τους έργο, καλώδια, πίνακες, PDF) και ζουν σε
+    καρτέλες του AppWindow. Αρχεία του άλλου τύπου στέλνονται στην άλλη καρτέλα.
+    """
+
+    filesForOther = Signal(list)        # αρχεία που ανήκουν στον άλλο χώρο εργασίας
+    settingsChanged = Signal()          # οι ρυθμίσεις αναφοράς είναι κοινές
+
+    def __init__(self, mode: str = "standard", embedded: bool = False):
         super().__init__()
+        self.mode = mode
+        self.live = mode == "live"
+        self._k = "live/" if self.live else ""     # χωριστά κλειδιά διάταξης/ομαδοποίησης ανά χώρο
+        if embedded:
+            self.setWindowFlags(Qt.Widget)
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.setWindowIcon(app_icon())
         self.resize(1400, 860)
@@ -578,7 +619,7 @@ class MainWindow(QMainWindow):
             self.settings = ReportSettings.from_json(self.qs.value("report", "", str) or "{}")
         except Exception:
             self.settings = ReportSettings()
-        self.project = Project(group_level=self._saved_level())
+        self.project = Project(group_level=self._saved_level(), live=self.live)
         self.current_cable: Cable | None = None
         self._row_fibers: list[Fiber] = []
         self._removed: list[Path] = []          # για "Επαναφορά αφαιρεμένων"
@@ -603,7 +644,7 @@ class MainWindow(QMainWindow):
         act("Προσθήκη αρχείων", st.StandardPixmap.SP_FileIcon, self.add_files)
         act("Καθαρισμός", st.StandardPixmap.SP_DialogResetButton, self.clear)
         tb.addSeparator()
-        act("Ρυθμίσεις αναφοράς", st.StandardPixmap.SP_FileDialogDetailedView, self.edit_settings)
+        act("Ρυθμίσεις", st.StandardPixmap.SP_FileDialogDetailedView, self.edit_settings)
         self.act_pdf = act("Δημιουργία PDF", st.StandardPixmap.SP_DialogSaveButton, self.export, "Ctrl+P")
         tb.addSeparator()
         self.act_cables = act("Καλώδια", st.StandardPixmap.SP_FileDialogListView, lambda on: self.toggle_cables(on))
@@ -756,6 +797,8 @@ class MainWindow(QMainWindow):
         vl.setSpacing(0)
         vl.addWidget(self.outer_split, 1)
         self.setCentralWidget(central)
+        if self.live:                   # live μετρήσεις: δεν υπάρχει γράφημα dB / απόσταση
+            self.plot.hide()
         self._restore_layout()
         self._refresh()
 
@@ -764,7 +807,7 @@ class MainWindow(QMainWindow):
 
     def _restore_layout(self):
         for key, attr in self.LAYOUT:
-            state = self.qs.value(key)
+            state = self.qs.value(self._k + key)
             if state is not None:
                 try:
                     getattr(self, attr).restoreState(state)
@@ -774,7 +817,7 @@ class MainWindow(QMainWindow):
 
     def _save_layout(self):
         for key, attr in self.LAYOUT:
-            self.qs.setValue(key, getattr(self, attr).saveState())
+            self.qs.setValue(self._k + key, getattr(self, attr).saveState())
 
     # ---------- πάνελ καλωδίων: κλείσιμο μέχρι τέρμα δεξιά και εύκολο άνοιγμα
     def cables_visible(self) -> bool:
@@ -863,6 +906,10 @@ class MainWindow(QMainWindow):
             if not res:
                 return
             msg = load_message(res)
+            if res.other:
+                other = "Live 1625 / 1650" if not self.live else "1310 / 1550"
+                msg = msg.rstrip(".") + f", {len(res.other)} στην καρτέλα «{other}»."
+                self.filesForOther.emit(list(res.other))
             if res.failed:
                 msg += f"\n\n{len(res.failed)} αρχεία δεν διαβάστηκαν (θα ξαναδοκιμαστούν στην επόμενη φόρτωση):\n" \
                     + "\n".join(f"• {p.name}: {e}" for p, e in res.failed[:15])
@@ -872,7 +919,7 @@ class MainWindow(QMainWindow):
         run_with_progress(self, "Φόρτωση αρχείων…", job, done)
 
     def _saved_level(self) -> int | None:
-        v = int(self.qs.value("groupLevel", 0) or 0)
+        v = int(self.qs.value(f"{self._k}groupLevel", 0) or 0)
         return v or None
 
     def _fill_group_combo(self):
@@ -893,13 +940,13 @@ class MainWindow(QMainWindow):
 
     def _group_changed(self, _index):
         level = self.group_combo.currentData() or None
-        self.qs.setValue("groupLevel", level or 0)
+        self.qs.setValue(f"{self._k}groupLevel", level or 0)
         self.project.group_level = level
         self.project.regroup()
         self._refresh()
 
     def clear(self):
-        self.project = Project(group_level=self._saved_level())
+        self.project = Project(group_level=self._saved_level(), live=self.live)
         self.current_cable = None
         self._removed = []
         self._refresh()
@@ -1393,8 +1440,11 @@ class MainWindow(QMainWindow):
     def edit_settings(self):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec():
+            mode = theme.apply_theme(QApplication.instance(), dlg.theme.currentData())
+            self.qs.setValue(theme.SETTINGS_KEY, mode)
             self.settings = dlg.result_settings()
             self._save_settings()
+            self.settingsChanged.emit()
             cur = self.tree.currentItem()
             name = cur.data(0, Qt.UserRole) if cur else None
             self._refresh()
@@ -1471,6 +1521,77 @@ class MainWindow(QMainWindow):
                 open_folder(out_dir)
 
         run_with_progress(self, "Δημιουργία PDF…", job, done)
+
+
+class AppWindow(QMainWindow):
+    """Κύριο παράθυρο: δύο καρτέλες εργασίας, «1310 / 1550» και «Live 1625 / 1650».
+
+    Όπως τα έγγραφα σε καρτέλες: κάθε καρτέλα είναι ανεξάρτητη. Ό,τι φορτώνεται πηγαίνει στην
+    καρτέλα του τύπου του· οι ρυθμίσεις αναφοράς είναι κοινές.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"{APP_NAME} {__version__}")
+        self.setWindowIcon(app_icon())
+        self.resize(1400, 900)
+        self.setAcceptDrops(True)
+        self.qs = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.workspaces: dict[str, MainWindow] = {}
+        for mode, title in WORKSPACES:
+            ws = MainWindow(mode, embedded=True)
+            ws.filesForOther.connect(lambda files, m=mode: self._route(m, files))
+            ws.settingsChanged.connect(lambda m=mode: self._settings_changed(m))
+            self.workspaces[mode] = ws
+            self.tabs.addTab(ws, title)
+        self.tabs.setStyleSheet("QTabBar::tab { padding: 6px 18px; font-weight: bold; }"
+                                "QTabBar::tab:selected { border-bottom: 3px solid #e9af36; }")
+        self.setCentralWidget(self.tabs)
+        self.tabs.setCurrentIndex(int(self.qs.value("workspaceTab", 0) or 0) % self.tabs.count())
+
+    @property
+    def standard(self) -> MainWindow:
+        return self.workspaces["standard"]
+
+    @property
+    def live(self) -> MainWindow:
+        return self.workspaces["live"]
+
+    def current(self) -> MainWindow:
+        return self.tabs.currentWidget()
+
+    def load_paths(self, paths: list[Path]):
+        """Φόρτωση: πηγαίνει στην τρέχουσα καρτέλα· ό,τι είναι του άλλου τύπου περνά στην άλλη."""
+        self.current().load_paths(paths)
+
+    def _route(self, from_mode: str, files: list):
+        target = "live" if from_mode == "standard" else "standard"
+        ws = self.workspaces[target]
+        ws.load_paths([Path(f) for f in files])
+        src = self.workspaces[from_mode]
+        if not src.project.cables:              # η τρέχουσα δεν πήρε τίποτα: δείξε εκεί που πήγαν
+            self.tabs.setCurrentWidget(ws)
+
+    def _settings_changed(self, from_mode: str):
+        for mode, ws in self.workspaces.items():
+            if mode != from_mode:
+                ws.settings = ReportSettings.from_json(self.workspaces[from_mode].settings.to_json())
+                ws._refresh()
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        self.load_paths([Path(u.toLocalFile()) for u in e.mimeData().urls() if u.isLocalFile()])
+
+    def closeEvent(self, e):
+        self.qs.setValue("workspaceTab", self.tabs.currentIndex())
+        for ws in self.workspaces.values():
+            ws.close()                          # αποθήκευση διάταξης, τερματισμός εργασιών
+        super().closeEvent(e)
 
 
 def load_message(res) -> str:
@@ -1551,8 +1672,9 @@ def main():
     overrides.use_store(overrides.OverrideStore(data_dir / "event_overrides.json"))
     fiber_info.use_store(fiber_info.InfoStore(data_dir / "fiber_info.json"))
     app.setStyle("Fusion")
+    theme.apply_theme(app, QSettings(SETTINGS_ORG, SETTINGS_APP).value(theme.SETTINGS_KEY, theme.DEFAULT_THEME))
     app.setWindowIcon(app_icon())               # εικονίδιο στη γραμμή εργασιών των Windows
-    w = MainWindow()
+    w = AppWindow()
     w.show()
     problems = [e for e in (overrides.STORE.load_error, fiber_info.STORE.load_error) if e]
     if problems:                                # αλλοιωμένο αρχείο διορθώσεων: ξεκινά κανονικά, με ενημέρωση

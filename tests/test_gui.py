@@ -353,50 +353,61 @@ def test_cables_panel_resizes_independently_and_layout_persists(qapp, monkeypatc
     _dispose(w2, qapp)
 
 
-def test_live_splitter_menu_and_event_selection_sync(qapp, tmp_path, monkeypatch):
+def test_two_workspaces_live_splitter_and_event_selection(qapp, tmp_path, monkeypatch):
+    """Δύο καρτέλες: 1310/1550 και live 1625/1650· splitter μόνο στη live· επιλογή συμβάντος παντού."""
     from otdr_report import overrides
     from otdr_report.synthetic import build_sor
     monkeypatch.setattr(appmod.QSettings, "value", lambda self, key, default=None, type=None: default)
     monkeypatch.setattr(appmod.QSettings, "setValue", lambda self, key, value: None)
     monkeypatch.setattr(overrides, "STORE", overrides.OverrideStore(tmp_path / "ov.json"))
     (tmp_path / "PON_SCP1_1625_0001.sor").write_bytes(build_sor(1625, 2.0, [(0.5, 10.2, 0), (1.2, 0.1, 0)]))
-    (tmp_path / "N_SCP1_1310_0001.sor").write_bytes(build_sor(1310, 2.0, [(0.5, 0.1, 0)]))
-    (tmp_path / "N_SCP1_1550_0001.sor").write_bytes(build_sor(1550, 2.0, [(0.5, 0.1, 0)]))
-    w = appmod.MainWindow()
-    w.resize(1400, 860)
-    w.show()
-    w.load_paths([tmp_path])
-    wait(qapp, lambda: w.project.file_count == 3)
-    # live: όχι «ελλιπής», με splitter στο μενού
+    (tmp_path / "N_SCP1_1310_0001.sor").write_bytes(build_sor(1310, 2.0, [(0.5, 0.1, 0), (1.0, 0.1, 0)]))
+    (tmp_path / "N_SCP1_1550_0001.sor").write_bytes(build_sor(1550, 2.0, [(0.5, 0.1, 0), (1.0, 0.1, 0)]))
+    app = appmod.AppWindow()
+    app.show()
+    app.tabs.setCurrentWidget(app.standard)
+    app.load_paths([tmp_path])                  # ένας φάκελος με τα δύο είδη
+    wait(qapp, lambda: app.standard.project.file_count == 2 and app.live.project.file_count == 1)
+    assert list(app.standard.project.cables) == ["N_SCP1"] and list(app.live.project.cables) == ["PON_SCP1"]
+    assert not app.live.plot.isVisible() and app.standard.plot.isVisible()     # live: χωρίς γράφημα
+
+    # live: όχι «ελλιπής», splitter στο μενού
+    w = app.live
+    app.tabs.setCurrentWidget(w)
     live = w.project.cables["PON_SCP1"]
     assert live.incomplete() == []
     w._show_cable(live)
     w.table.selectRow(0)
     qapp.processEvents()
     ev = next(e for e in w.linkmap.sor.events if e.role == "event")
-    menu = w.linkmap.build_menu(ev)
-    sub = next(a.menu() for a in menu.actions() if a.text() == "Splitter")
+    sub = next(a.menu() for a in w.linkmap.build_menu(ev).actions() if a.text() == "Splitter")
     assert [a.text() for a in sub.actions()] == [f"Splitter 1:{n}" for n in (2, 4, 8, 16, 32, 64, 128)]
     w._change_event_type(ev.distance_km, "splitter:8")
     qapp.processEvents()
     ev = next(e for e in w.linkmap.sor.events if e.role == "event")
     assert ev.splitter_ratio == 8
     assert w.table.item(0, col(w, "Αποτέλεσμα")).text() == "PASS"           # 10.2 ≤ 10.5 dB (1:8)
-    # αριστερό κλικ στο Link map → γραμμή στον πίνακα συμβάντων, και αντίστροφα
-    idx = w.linkmap.sor.events.index(ev)
-    w.linkmap.eventSelected.emit(idx)
-    tbl = w._current_events_table()
-    assert {i.row() for i in tbl.selectedItems()} == {2 * idx} and w.linkmap.selected == idx
-    tbl.selectRow(0)
-    qapp.processEvents()
-    assert w.linkmap.selected == 0
-    # κανονική μέτρηση: χωρίς splitter
-    w._show_cable(w.project.cables["N_SCP1"])
-    w.table.selectRow(0)
-    qapp.processEvents()
-    e2 = next(e for e in w.linkmap.sor.events if e.role == "event")
-    assert "Splitter" not in [a.text() for a in w.linkmap.build_menu(e2).actions()]
-    _dispose(w, qapp)
+
+    # 1310/1550: χωρίς splitter, και επιλογή συμβάντος Link map ↔ πίνακας (και στις δύο καρτέλες)
+    for ws in (app.standard, app.live):
+        app.tabs.setCurrentWidget(ws)
+        ws._show_cable(ws.project.sorted_cables()[0])
+        ws.table.selectRow(0)
+        qapp.processEvents()
+        e = next(x for x in ws.linkmap.sor.events if x.role == "event")
+        if ws is app.standard:
+            assert "Splitter" not in [a.text() for a in ws.linkmap.build_menu(e).actions()]
+        idx = ws.linkmap.sor.events.index(e)
+        ws.linkmap.eventSelected.emit(idx)                                  # κλικ στο Link map
+        tbl = ws._current_events_table()
+        assert {i.row() for i in tbl.selectedItems()} == {2 * idx} and ws.linkmap.selected == idx
+        tbl.selectRow(0)                                                    # κλικ στον πίνακα
+        qapp.processEvents()
+        assert ws.linkmap.selected == 0
+    app.close()
+    for ws in app.workspaces.values():
+        _dispose(ws, qapp)
+    _dispose(app, qapp)
 
 
 def test_settings_dialog_splitter_limits(qapp):
@@ -409,3 +420,23 @@ def test_settings_dialog_splitter_limits(qapp):
     assert out.thresholds.max_splitter_loss["8"] == 11.0 and not out.thresholds.check_splitter
     import shiboken6
     shiboken6.delete(dlg)                    # χωρίς γονέα: να μην καταστραφεί μετά το QApplication
+
+
+def test_theme_light_dark_auto(qapp):
+    from PySide6.QtGui import QPalette
+    from otdr_report import theme
+    try:
+        assert theme.apply_theme(qapp, "dark") == "dark"
+        assert qapp.palette().color(QPalette.Window).lightness() < 80                # σκούρο
+        assert theme.apply_theme(qapp, "light") == "light"
+        assert qapp.palette().color(QPalette.Window).lightness() > 200               # λευκό
+        assert qapp.palette().color(QPalette.Text).lightness() < 80                  # σκούρα γράμματα
+        assert theme.apply_theme(qapp, "nonsense") == theme.DEFAULT_THEME == "light"
+        assert theme.apply_theme(qapp, "auto") == "auto"
+        from otdr_report.settings import ReportSettings
+        dlg = appmod.SettingsDialog(ReportSettings())
+        assert [dlg.theme.itemData(i) for i in range(dlg.theme.count())] == ["light", "dark", "auto"]
+        import shiboken6
+        shiboken6.delete(dlg)
+    finally:
+        theme.apply_theme(qapp, "light")
