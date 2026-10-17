@@ -71,9 +71,35 @@ def refresh_widgets(app: QApplication) -> None:
         w.update()
 
 
+_current = {"mode": None, "connected": False}
+
+
+def current_mode() -> str | None:
+    return _current["mode"]
+
+
+def _os_scheme_changed(scheme=None):
+    """«Όπως τα Windows»: όταν αλλάξει το θέμα των Windows ενώ τρέχει η εφαρμογή, ακολουθεί."""
+    app = QApplication.instance()
+    if app is None or _current["mode"] != "auto":
+        return
+    if scheme is None:
+        scheme = app.styleHints().colorScheme()
+    dark = scheme == Qt.ColorScheme.Dark
+    app.setPalette(dark_palette() if dark else light_palette())
+    refresh_widgets(app)
+
+
 def apply_theme(app: QApplication, mode: str) -> str:
     """Εφαρμόζει το θέμα σε όλη την εφαρμογή (αμέσως) και επιστρέφει αυτό που εφαρμόστηκε."""
     mode = normalize(mode)
+    _current["mode"] = mode
+    if not _current["connected"]:
+        try:
+            app.styleHints().colorSchemeChanged.connect(_os_scheme_changed)
+            _current["connected"] = True
+        except AttributeError:
+            pass
     scheme = {"light": Qt.ColorScheme.Light, "dark": Qt.ColorScheme.Dark}.get(mode, Qt.ColorScheme.Unknown)
     try:
         app.styleHints().setColorScheme(scheme)        # και η μπάρα τίτλου των Windows
