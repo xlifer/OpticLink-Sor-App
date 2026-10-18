@@ -896,7 +896,7 @@ class ReportBuilder:
                                      [e.splitter_ratio for x in present for e in x.events if e.splitter_ratio],
                                      fs=7 if not compact else 6.5)
         if boxes:
-            tail += [Spacer(1, (1.5 if not compact else 1) * mm)] + boxes
+            tail += boxes                            # ο τίτλος έχει ήδη το κενό του
         if foot:
             tail += [Spacer(1, (1.5 if not compact else 1) * mm), Paragraph(" &nbsp; · &nbsp; ".join(foot), self.st["small"])]
         return body, tail
