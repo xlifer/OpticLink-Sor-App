@@ -64,7 +64,8 @@ def test_export_dialog_name_default_and_multi(qapp_or_skip, tmp_path):
     shiboken6.delete(dlg)
 
 
-def test_linkmap_black_in_dark_with_contrast(qapp_or_skip, tmp_path):
+def test_linkmap_stays_white_in_dark(qapp_or_skip, tmp_path):
+    """Το Link map μένει σε λευκό «χαρτί» σε κάθε θέμα (απόφαση χρήστη, 3.5.2)."""
     from PySide6.QtCore import QPoint
     from otdr_report import theme
     from otdr_report.linkmap_widget import LinkMapWidget
@@ -75,16 +76,12 @@ def test_linkmap_black_in_dark_with_contrast(qapp_or_skip, tmp_path):
     sor = prepare(parse_sor(f.measurements[1310].path), ReportSettings())
     app = qapp_or_skip
     try:
-        for mode, bg in (("dark", "#000000"), ("light", "#ffffff")):
+        for mode in ("dark", "light"):
             theme.apply_theme(app, mode)
             w = LinkMapWidget()
             w.resize(800, 170)
             w.set_measurement(sor, ReportSettings().thresholds)
-            img = w.grab().toImage()
-            assert img.pixelColor(QPoint(3, 160)).name() == bg
-            text = w.colors()["text"]
-            lum = lambda c: 0.2126 * c.redF() + 0.7152 * c.greenF() + 0.0722 * c.blueF()   # noqa: E731
-            assert abs(lum(text) - lum(w.colors()["bg"])) > 0.6                         # έντονη αντίθεση
+            assert w.grab().toImage().pixelColor(QPoint(3, 160)).name() == "#ffffff"
             w.deleteLater()
     finally:
         theme.apply_theme(app, "light")

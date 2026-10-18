@@ -46,17 +46,6 @@ class LinkMapWidget(QWidget):
         self.sor, self.th, self.units_m = sor, th, units_m
         self.update()
 
-    # Φόντο και χρώματα: λευκό στο φωτεινό θέμα, μαύρο στο σκούρο, πάντα με αντίθεση ≥ 4.5:1
-    # (τα εικονίδια έχουν δικό τους φόντο, οπότε ο λόγος «1:N» και τα S/E πάνω τους μένουν ίδια)
-    COLORS = {
-        "light": {"bg": "#ffffff", "text": "#24292f", "muted": "#57606a", "scale": "#3b4a8c", "fail": "#cf222e"},
-        "dark": {"bg": "#000000", "text": "#e6edf3", "muted": "#9198a1", "scale": "#8ab4f8", "fail": "#ff7b72"},
-    }
-
-    def colors(self) -> dict[str, QColor]:
-        from . import theme
-        return {k: QColor(v) for k, v in self.COLORS["dark" if theme.is_dark() else "light"].items()}
-
     def set_selected(self, index: int | None):
         """Επιλογή συμβάντος απ' έξω (π.χ. από τον πίνακα συμβάντων), χωρίς σήμα."""
         if index != self.selected:
@@ -71,11 +60,10 @@ class LinkMapWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        c = self.colors()
-        p.fillRect(self.rect(), c["bg"])
+        p.fillRect(self.rect(), QColor("white"))
         self._hits = []
         if not self.sor:
-            p.setPen(c["muted"])
+            p.setPen(QColor("#57606a"))             # λευκό «χαρτί» σε κάθε θέμα: σκούρο γκρι (6.4:1)
             p.drawText(self.rect(), Qt.AlignCenter, "Link map: επίλεξε μέτρηση")
             return
         nodes = linkmap_events(self.sor)
@@ -93,18 +81,18 @@ class LinkMapWidget(QWidget):
         total = f"{self._fmt(kms[-1])}{unit}"
         bx0, bx1 = 14.0, w - 18.0 - fm.horizontalAdvance(total)
         by = fm.height() + 6
-        p.setPen(QPen(c["scale"], 2))
+        p.setPen(QPen(QColor("#3b4a8c"), 2))
         p.drawLine(QPointF(bx0, by), QPointF(bx1, by))
         sx = scale_positions(kms, bx0, bx1)
         tw = [fm.horizontalAdvance(str(i)) for i, _ in nodes]
         show = fit_labels([x - w / 2 for x, w in zip(sx, tw)], tw, 3)
         for (i, _e), x, st, vis in zip(nodes, sx, states, show):
-            col = c["fail"] if st == "fail" else c["text"]
+            col = FAIL_C if st == "fail" else QColor("#24292f")
             p.setPen(QPen(col, 1.2))
             p.drawLine(QPointF(x, by - 4), QPointF(x, by + 4))
             if vis or st == "fail":
                 p.drawText(QRectF(x - 20, by - fm.height() - 4, 40, fm.height()), Qt.AlignCenter, str(i))
-        p.setPen(c["text"])
+        p.setPen(QColor("#24292f"))
         p.drawText(QPointF(bx1 + 4, by + fm.ascent() / 2 - 1), total)
         # εικονίδια: κατά προσέγγιση αναλογικά, με ελάχιστη απόσταση
         top = by + 16 + 2 * fm.height()
@@ -153,7 +141,7 @@ class LinkMapWidget(QWidget):
                 p.setPen(QPen(QColor("#e9af36"), 2))
                 p.setBrush(Qt.NoBrush)
                 p.drawEllipse(QPointF(rect.right() + 2, rect.top() - 2), 4, 4)
-            p.setPen(c["text"])
+            p.setPen(QColor("#24292f"))
             if show_idx[k]:
                 p.drawText(QPointF(rect.left(), rect.top() - 4 - fm.height() - fm.descent()), str(i))
             if show_dist[k]:
