@@ -110,7 +110,7 @@ def test_live_pdf_without_chart_and_with_splitter(tmp_path, store):
     out = generate_reports([(c, [f])], tmp_path / "out", s)
     assert len(out) == 1 and out.excluded == []                           # δεν θεωρείται ελλιπής
     txt = " ".join(pg.extract_text() for pg in pypdf.PdfReader(out[0]).pages)
-    assert "Splitter 1:8" in txt and "1:8" in txt and "splitter 1:8 ≤ 10.5 dB" in txt
+    assert "Splitter 1:8" in txt and "Splitter Threshold" in txt and "1625Max Loss dB" in txt and "10.5" in txt
     assert "1310" not in txt and "1550 nm" not in txt
 
 

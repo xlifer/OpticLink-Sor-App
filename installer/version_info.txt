@@ -1,15 +1,15 @@
 VSVersionInfo(
-  ffi=FixedFileInfo(filevers=(3, 5, 0, 0), prodvers=(3, 5, 0, 0), mask=0x3f, flags=0x0,
+  ffi=FixedFileInfo(filevers=(3, 5, 2, 0), prodvers=(3, 5, 2, 0), mask=0x3f, flags=0x0,
                     OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
   kids=[
     StringFileInfo([StringTable('040804b0', [
       StringStruct('CompanyName', 'Grandway Batch Report'),
       StringStruct('FileDescription', 'Grandway Batch Report'),
-      StringStruct('FileVersion', '3.5.0'),
+      StringStruct('FileVersion', '3.5.2'),
       StringStruct('InternalName', 'GrandwayBatchReport'),
       StringStruct('OriginalFilename', 'GrandwayBatchReport.exe'),
       StringStruct('ProductName', 'Grandway Batch Report'),
-      StringStruct('ProductVersion', '3.5.0')])]),
+      StringStruct('ProductVersion', '3.5.2')])]),
     VarFileInfo([VarStruct('Translation', [0x0408, 1200])])
   ]
 )

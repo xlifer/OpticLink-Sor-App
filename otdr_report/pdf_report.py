@@ -26,7 +26,7 @@ from .linkmap import (asset_dir, fit_labels, icon_path, line_band, linkmap_event
                       node_state, scale_positions)
 from .matching import WAVELENGTH_TOLERANCE_NM, Cable, Fiber
 from .settings import ReportSettings, evaluate, event_ok, is_dead_fiber, prepare
-from .sor import SorError, SorFile, downsample, parse_sor
+from .sor import SorError, SorFile, downsample, is_live_wavelength, parse_sor
 
 FONT_DIR = Path(__file__).parent / "fonts"
 _fonts_ready = False
@@ -56,6 +56,10 @@ TEXT = {
         "types": {"Αρχή": "Αρχή", "Τέλος": "Τέλος", "Ανακλαστικό": "Ανακλαστικό",
                   "Μη ανακλ.": "Μη ανακλ.", "Launch": "Launch", "seg": "Τμήμα"},
         "dead": "Νεκρή ίνα στα {wl} nm: δεν βρέθηκε ίνα μετά το launch cable (FAIL).",
+        "thr": "Όρια", "thr_cols": ["Απώλεια κόλλησης", "Απώλεια connector", "Ανάκλαση", "Κλίση dB/km",
+                                    "Απώλεια ζεύξης"],
+        "thr_split": "Όρια splitter", "thr_type": "Τύπος", "thr_max_loss": "{wl} Μέγ. απώλεια dB",
+        "thr_max_refl": "{wl} Μέγ. ανάκλαση dB",
         "slope": "Κλίση (dB/km)", "criteria": "Κριτήρια PASS", "launch_cable": "Launch cable", "link_map": "Link map",
         "prepared": "Συντάχθηκε από", "verified": "Ελέγχθηκε από", "approved": "Εγκρίθηκε από",
         "machine": "Στοιχεία οργάνου", "module": "Μοντέλο", "serial": "Αρ. σειράς",
@@ -80,6 +84,9 @@ TEXT = {
         "types": {"Αρχή": "Start", "Τέλος": "End", "Ανακλαστικό": "Reflective",
                   "Μη ανακλ.": "Non-refl.", "Launch": "Launch", "seg": "Seg."},
         "dead": "Dead fiber at {wl} nm: no fiber found after the launch cable (FAIL).",
+        "thr": "Threshold", "thr_cols": ["Splice loss", "Connector loss", "Reflection", "Slope dB/km", "Span loss"],
+        "thr_split": "Splitter Threshold", "thr_type": "Type", "thr_max_loss": "{wl}Max Loss dB",
+        "thr_max_refl": "{wl}Max Reflection dB",
         "slope": "Slope (dB/km)", "criteria": "PASS criteria", "launch_cable": "Launch cable", "link_map": "Link map",
         "prepared": "Prepared by", "verified": "Verified by", "approved": "Approved by",
         "machine": "Machine Information", "module": "Module", "serial": "Serial No.",
@@ -388,6 +395,36 @@ class LinkMap(Flowable):
         c.restoreState()
 
 
+class TitledBox(Flowable):
+    """Τίτλος στο κέντρο (υπογραμμισμένος) και από κάτω ο πίνακας, στο ίδιο πλάτος με τους άλλους πίνακες."""
+
+    def __init__(self, title: str, content, width: float, font_size: float = 9):
+        super().__init__()
+        self.title, self.content, self.width, self.fs = title, content, width, font_size
+        self.hAlign = "CENTER"                              # όπως οι υπόλοιποι πίνακες
+
+    def wrap(self, aw, ah):
+        _, ch = self.content.wrap(self.width, ah)
+        self._ch = ch
+        self.height = ch + self.fs * 1.4
+        return self.width, self.height
+
+    def draw(self):
+        c = self.canv
+        base = self._ch + self.fs * 0.4
+        c.saveState()
+        c.setFont("DejaVu", self.fs)
+        tw = c.stringWidth(self.title, "DejaVu", self.fs)
+        x = (self.width - tw) / 2
+        c.setFillColor(colors.black)
+        c.drawString(x, base, self.title)
+        c.setStrokeColor(colors.black)
+        c.setLineWidth(0.5)
+        c.line(x, base - self.fs * 0.15, x + tw, base - self.fs * 0.15)   # υπογράμμιση τίτλου
+        c.restoreState()
+        self.content.drawOn(c, 0, 0)
+
+
 def _nice_ticks(lo, hi, n):
     span = hi - lo
     if span <= 0:
@@ -648,11 +685,12 @@ class ReportBuilder:
         widths = [first] + [rest] * (4 * len(wls)) + [21 * mm]
         story.append(self._table(rows, widths, result_col=result_cols, font_size=6.5))
         story.append(Spacer(1, 3 * mm))
-        crit = criteria_text(th, self.s.language)
-        if crit:
+        if th.enabled:
             story.append(Paragraph(
                 f"{t['pass']}: <b>{n_pass}</b> &nbsp; · &nbsp; {t['fail']}: <b>{n_fail}</b>", self.st["n"]))
-            story.append(Paragraph(f"{t['criteria']}: {_esc(crit)}", self.st["small"]))
+            story.append(Spacer(1, 2 * mm))
+            story += self.threshold_boxes(wls, [e.splitter_ratio for f in fibers for x in read[f.key].values()
+                                                for e in x.events if e.splitter_ratio])
         miss = [f.display for f in fibers if not cable.required_for(f) <= set(read[f.key])]
         if miss:
             story.append(Paragraph(f"{t['incomplete']}: " + ", ".join(miss), self.st["small"]))
@@ -862,12 +900,70 @@ class ReportBuilder:
         foot = []
         if self.s.operator:
             foot.append(f"{t['operator']}: {_esc(self.s.operator)}")
-        crit = criteria_text(th, self.s.language, [e.splitter_ratio for x in present for e in x.events if e.splitter_ratio])
-        if crit:
-            foot.append(f"{t['criteria']}: {_esc(crit)}")
+        boxes = self.threshold_boxes([x.wavelength for x in present],
+                                     [e.splitter_ratio for x in present for e in x.events if e.splitter_ratio],
+                                     fs=7 if not compact else 6.5)
+        if boxes:
+            tail += [Spacer(1, (1.5 if not compact else 1) * mm)] + boxes
         if foot:
             tail += [Spacer(1, (1.5 if not compact else 1) * mm), Paragraph(" &nbsp; · &nbsp; ".join(foot), self.st["small"])]
         return body, tail
+
+    def threshold_boxes(self, wavelengths, splitters=(), width: float | None = None, fs: float = 7.5):
+        """Πλαίσια «Threshold» (ανά μήκος κύματος) και «Splitter Threshold» (μόνο αν υπάρχουν splitters)."""
+        th = self.s.thresholds
+        if not th.enabled:
+            return []
+        t = self.t
+        width = width or A4[0] - 24 * mm
+        inner = width
+
+        def table(rows, widths):
+            # ίδια εμφάνιση με τους υπόλοιπους πίνακες: πορτοκαλί επικεφαλίδα, γκρι πρώτη στήλη, περιγράμματα
+            hstyle = ParagraphStyle("thr_h", fontName="DejaVu-Bold", fontSize=fs, leading=fs + 1.5,
+                                    textColor=HEAD_FG, alignment=1)
+            rows = [[Paragraph(_esc(h), hstyle) for h in rows[0]]] + rows[1:]
+            tbl = Table(rows, colWidths=widths)
+            tbl.setStyle(TableStyle([
+                ("FONT", (0, 0), (-1, -1), "DejaVu", fs), ("FONT", (0, 1), (0, -1), "DejaVu-Bold", fs),
+                ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG), ("BACKGROUND", (0, 1), (0, -1), LABEL_BG),
+                ("GRID", (0, 0), (-1, -1), 0.3, GRID_C),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 0.8), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.8),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2)]))
+            return tbl
+
+        out = []
+        rows = [[""] + list(t["thr_cols"])]
+        for wl in wavelengths:
+            att = th.max_attenuation.get(str(wl))
+            rows.append([str(wl),
+                         f"{th.max_splice_loss:.3f}" if th.check_splice else "",
+                         f"{th.max_connector_loss:.3f}" if th.check_connector else "",
+                         f"{th.max_reflectance:.1f}" if th.check_reflectance else "",
+                         f"{att:.3f}" if th.check_attenuation and att is not None else "",
+                         f"{th.max_total_loss:.3f}" if th.check_total_loss else ""])
+        first = 0.12 * inner
+        out.append(TitledBox(t["thr"], table(rows, [first] + [(inner - first) / 5] * 5), width, fs + 1.5))
+        ratios = sorted(set(splitters))
+        live = [wl for wl in wavelengths if is_live_wavelength(wl)]
+        if ratios and th.check_splitter and live:
+            head = [t["thr_type"]]
+            for wl in live:
+                head += [t["thr_max_loss"].format(wl=wl), t["thr_max_refl"].format(wl=wl)]
+            rows = [head]
+            for n in ratios:
+                lim = th.max_splitter_loss.get(str(n))
+                row = [f"1:{n}"]
+                for _wl in live:
+                    row += [f"{lim:.1f}" if lim is not None else "",
+                            f"{th.max_reflectance:.1f}" if th.check_reflectance else ""]
+                rows.append(row)
+            first = 0.12 * inner
+            tbl = table(rows, [first] + [(inner - first) / (len(head) - 1)] * (len(head) - 1))
+            out.append(Spacer(1, 1.2 * mm))
+            out.append(TitledBox(t["thr_split"], tbl, width, fs + 1.5))
+        return out
 
     def _section_c(self, title: str):
         return Paragraph(_esc(title), self.st["h2c"])
@@ -1133,8 +1229,17 @@ def _pdf_stem(cable: Cable, fibers: list[Fiber], settings: ReportSettings) -> st
     return f"OTDR_report_{datetime.now():%Y%m%d_%H%M}"
 
 
+def default_pdf_name(parts: list[tuple[Cable, list[Fiber]]], one_pdf_per_cable: bool) -> str | None:
+    """Το προεπιλεγμένο όνομα (χωρίς .pdf) όταν η εξαγωγή βγάζει ΕΝΑ αρχείο· None αν βγάζει πολλά."""
+    if not parts or (one_pdf_per_cable and len(parts) > 1):
+        return None
+    cable, fibers = parts[0]
+    s = ReportSettings(one_pdf_per_cable=one_pdf_per_cable)
+    return _pdf_stem(cable, fibers, s)
+
+
 def existing_pdf_conflicts(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path,
-                           settings: ReportSettings) -> list[Path]:
+                           settings: ReportSettings, name: str | None = None) -> list[Path]:
     """PDF που υπάρχουν ήδη στον φάκελο με το όνομα που θα έπαιρνε η εξαγωγή (χωρίς διάκριση πεζών/κεφαλαίων)."""
     out_dir = Path(out_dir)
     if not out_dir.is_dir():
@@ -1144,7 +1249,8 @@ def existing_pdf_conflicts(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path
     found = []
     for group in groups:
         cable, fibers = group[0]
-        hit = on_disk.get(f"{_pdf_stem(cable, fibers, settings)}.pdf".casefold())
+        stem = safe_filename(name) if name and len(groups) == 1 else _pdf_stem(cable, fibers, settings)
+        hit = on_disk.get(f"{stem}.pdf".casefold())
         if hit and hit not in found:
             found.append(hit)
     return found
@@ -1152,7 +1258,7 @@ def existing_pdf_conflicts(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path
 
 def generate_reports(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path, settings: ReportSettings,
                      progress: Callable[[int, int, str], bool] | None = None,
-                     overwrite: bool = False) -> ReportResult:
+                     overwrite: bool = False, name: str | None = None) -> ReportResult:
     """Δημιουργεί τα PDF.
 
     Κάθε αρχείο ξαναδιαβάζεται τώρα από τον δίσκο και αυτό που διαβάστηκε χρησιμοποιείται
@@ -1220,7 +1326,8 @@ def generate_reports(parts: list[tuple[Cable, list[Fiber]]], out_dir: Path, sett
         if not prepared:
             continue
         cable, fibers, _ = prepared[0]
-        stem = _pdf_stem(cable, fibers, settings)
+        # όνομα που έδωσε ο χρήστης: μόνο όταν η εξαγωγή βγάζει ένα αρχείο
+        stem = safe_filename(name) if name and len(groups) == 1 else _pdf_stem(cable, fibers, settings)
         name, k = stem, 2
         while name.casefold() in used or f"{name}.pdf".casefold() in on_disk:
             name, k = f"{stem} ({k})", k + 1

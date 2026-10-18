@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 
 from . import __version__
 from .matching import Cable, Fiber, Project, _natural_key, find_sor_files
-from .pdf_report import (TEXT, Units, event_headers, event_rows, existing_pdf_conflicts, fiber_verdict,
-                         generate_reports)
+from .pdf_report import (TEXT, Units, default_pdf_name, event_headers, event_rows, existing_pdf_conflicts,
+                         fiber_verdict, generate_reports)
 from .linkmap_widget import LinkMapWidget
 from . import fiber_info, overrides, theme
 from .settings import SPLITTER_DEFAULTS, ReportSettings, evaluate, is_dead_fiber, prepare
@@ -566,7 +566,17 @@ class ExportDialog(QDialog):
         b = QPushButton("…"); b.setFixedWidth(30); b.clicked.connect(self._pick)
         row = QHBoxLayout(); row.addWidget(self.out); row.addWidget(b)
         form.addRow("Φάκελος PDF", row)
+        # Όνομα αρχείου: ήδη συμπληρωμένο με το προεπιλεγμένο, αλλάζει ελεύθερα (όταν βγαίνει ένα PDF)
+        self.name = QLineEdit()
+        self.name.textEdited.connect(lambda _t: setattr(self, "_name_edited", bool(self.name.text().strip())))
+        self._name_edited = False
+        nrow = QHBoxLayout(); nrow.addWidget(self.name); nrow.addWidget(QLabel(".pdf"))
+        form.addRow("Όνομα αρχείου", nrow)
         lay.addLayout(form)
+        for sig in (self.cables.itemChanged, self.from_f.valueChanged, self.to_f.valueChanged,
+                    self.per_cable.toggled, self.all_in_one.toggled, self.only_complete.toggled):
+            sig.connect(lambda *_: self._update_name())
+        self._update_name()
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Δημιουργία")
@@ -598,6 +608,29 @@ class ExportDialog(QDialog):
             QMessageBox.warning(self, APP_NAME, "Δεν υπάρχουν ίνες με αυτές τις επιλογές.")
             return
         self.accept()
+
+    def _update_name(self):
+        """Προεπιλεγμένο όνομα για την τρέχουσα επιλογή· δεν πειράζει ό,τι έγραψε ο χρήστης."""
+        default = default_pdf_name(self.parts(), self.per_cable.isChecked())
+        if default is None:                     # πολλά PDF (ένα ανά καλώδιο): ονόματα αυτόματα
+            self.name.setEnabled(False)
+            self.name.clear()
+            self.name.setPlaceholderText("αυτόματα: ένα αρχείο ανά καλώδιο")
+            self._name_edited = False
+            return
+        self.name.setEnabled(True)
+        self.name.setPlaceholderText(default)
+        if not self._name_edited:
+            self.name.setText(default)
+
+    def file_name(self) -> str | None:
+        """Το όνομα που θα πάρει το PDF (χωρίς .pdf), ή None για αυτόματα ονόματα."""
+        if not self.name.isEnabled():
+            return None
+        text = self.name.text().strip()
+        if text.lower().endswith(".pdf"):
+            text = text[:-4].strip()
+        return text or None
 
     def parts(self) -> list[tuple[Cable, list[Fiber]]]:
         lo, hi = self.from_f.value(), self.to_f.value()
@@ -1493,7 +1526,8 @@ class MainWindow(QMainWindow):
         parts = dlg.parts()
         settings = self.settings
         overwrite = False
-        clash = existing_pdf_conflicts(parts, out_dir, settings)
+        name = dlg.file_name()
+        clash = existing_pdf_conflicts(parts, out_dir, settings, name)
         if clash:                       # ποτέ σιωπηλή αντικατάσταση προηγούμενου παραδοτέου
             box = QMessageBox(self)
             box.setWindowTitle(APP_NAME)
@@ -1515,7 +1549,7 @@ class MainWindow(QMainWindow):
             def prog(done, total, label):
                 w.progress.emit(done, total, label)
                 return not w.cancelled
-            return generate_reports(parts, out_dir, settings, prog, overwrite=overwrite)
+            return generate_reports(parts, out_dir, settings, prog, overwrite=overwrite, name=name)
 
         def done(result, cancelled):
             # Ό,τι άλλαξε στον δίσκο (νέα μέτρηση, αρχείο που χάθηκε) φαίνεται και στην οθόνη
