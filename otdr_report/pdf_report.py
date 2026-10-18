@@ -396,33 +396,25 @@ class LinkMap(Flowable):
 
 
 class TitledBox(Flowable):
-    """Τίτλος στο κέντρο (υπογραμμισμένος) και από κάτω ο πίνακας, στο ίδιο πλάτος με τους άλλους πίνακες."""
+    """Τίτλος ενότητας (αριστερά, γκρι, όπως οι άλλοι τίτλοι) και από κάτω ο πίνακας, πάντα μαζί."""
 
-    def __init__(self, title: str, content, width: float, font_size: float = 9):
+    def __init__(self, title, content):
         super().__init__()
-        self.title, self.content, self.width, self.fs = title, content, width, font_size
-        self.hAlign = "CENTER"                              # όπως οι υπόλοιποι πίνακες
+        self.title, self.content = title, content
+        self.hAlign = "CENTER"
 
     def wrap(self, aw, ah):
-        _, ch = self.content.wrap(self.width, ah)
-        self._ch = ch
-        self.height = ch + self.fs * 1.4
+        self._tw, self._th = self.title.wrap(aw, ah)
+        self._cw, self._ch = self.content.wrap(aw, ah)
+        self.width = max(self._tw, self._cw)
+        gap = self.title.getSpaceAfter() + self.title.getSpaceBefore()
+        self._gap = gap
+        self.height = self._th + gap + self._ch
         return self.width, self.height
 
     def draw(self):
-        c = self.canv
-        base = self._ch + self.fs * 0.4
-        c.saveState()
-        c.setFont("DejaVu", self.fs)
-        tw = c.stringWidth(self.title, "DejaVu", self.fs)
-        x = (self.width - tw) / 2
-        c.setFillColor(colors.black)
-        c.drawString(x, base, self.title)
-        c.setStrokeColor(colors.black)
-        c.setLineWidth(0.5)
-        c.line(x, base - self.fs * 0.15, x + tw, base - self.fs * 0.15)   # υπογράμμιση τίτλου
-        c.restoreState()
-        self.content.drawOn(c, 0, 0)
+        self.title.drawOn(self.canv, 0, self._ch + self.title.getSpaceAfter())
+        self.content.drawOn(self.canv, 0, 0)
 
 
 def _nice_ticks(lo, hi, n):
@@ -917,6 +909,7 @@ class ReportBuilder:
         t = self.t
         width = width or A4[0] - 24 * mm
         inner = width
+        sec = self._section if fs >= 7 else self._section_c
 
         def table(rows, widths):
             # ίδια εμφάνιση με τους υπόλοιπους πίνακες: πορτοκαλί επικεφαλίδα, γκρι πρώτη στήλη, περιγράμματα
@@ -944,7 +937,7 @@ class ReportBuilder:
                          f"{att:.3f}" if th.check_attenuation and att is not None else "",
                          f"{th.max_total_loss:.3f}" if th.check_total_loss else ""])
         first = 0.12 * inner
-        out.append(TitledBox(t["thr"], table(rows, [first] + [(inner - first) / 5] * 5), width, fs + 1.5))
+        out.append(TitledBox(sec(t["thr"]), table(rows, [first] + [(inner - first) / 5] * 5)))
         ratios = sorted(set(splitters))
         live = [wl for wl in wavelengths if is_live_wavelength(wl)]
         if ratios and th.check_splitter and live:
@@ -962,7 +955,7 @@ class ReportBuilder:
             first = 0.12 * inner
             tbl = table(rows, [first] + [(inner - first) / (len(head) - 1)] * (len(head) - 1))
             out.append(Spacer(1, 1.2 * mm))
-            out.append(TitledBox(t["thr_split"], tbl, width, fs + 1.5))
+            out.append(TitledBox(sec(t["thr_split"]), tbl))
         return out
 
     def _section_c(self, title: str):
